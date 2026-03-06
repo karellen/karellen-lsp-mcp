@@ -136,6 +136,7 @@ class LspClient:
 
         result = await self._send_request("initialize", _converter.unstructure(init_params))
         self._server_capabilities = result.get("capabilities", {})
+        self._normalizer.on_server_info(result.get("serverInfo"))
         await self._send_notification("initialized", {})
         logger.info("LSP server initialized successfully")
 
@@ -333,6 +334,12 @@ class LspClient:
         if self._normalizer is None:
             return None
         return self._normalizer.estimated_remaining_seconds()
+
+    def supports_method(self, method):
+        """Check if the LSP server supports the given method."""
+        if self._normalizer is None:
+            return True
+        return self._normalizer.supports_method(method)
 
     def on_notification(self, method, callback):
         """Register a callback for a specific notification method."""

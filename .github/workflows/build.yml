@@ -21,9 +21,25 @@ jobs:
           - '3.12'
           - '3.11'
           - '3.10'
+        clangd-version:
+          - '22'
+        include:
+          - os: ubuntu-latest
+            python-version: '3.14'
+            clangd-version: '18'
+          - os: ubuntu-latest
+            python-version: '3.14'
+            clangd-version: '19'
+          - os: ubuntu-latest
+            python-version: '3.14'
+            clangd-version: '20'
+          - os: ubuntu-latest
+            python-version: '3.14'
+            clangd-version: '21'
     env:
       DEPLOY_PYTHONS: "3.14"
       DEPLOY_OSES: "Linux"
+      DEPLOY_CLANGD: "22"
       TWINE_USERNAME: __token__
       TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -32,13 +48,18 @@ jobs:
         if: |
           github.event_name == 'push' &&
           contains(env.DEPLOY_OSES, runner.os) &&
-          contains(env.DEPLOY_PYTHONS, matrix.python-version)
+          contains(env.DEPLOY_PYTHONS, matrix.python-version) &&
+          contains(env.DEPLOY_CLANGD, matrix.clangd-version)
         run: |
           echo "PYB_EXTRA_ARGS=+upload" >> $GITHUB_ENV
       - uses: pybuilder/build@master
         with:
           python-version: ${{ matrix.python-version }}
           pyb-extra-args: ${{ env.PYB_EXTRA_ARGS }}
+          pre-build: |
+            pip install --pre "karellen-llvm-clang>=${{ matrix.clangd-version }},<$(( ${{ matrix.clangd-version }} + 1 ))"
+            python -c pass
+            clangd --version
   build-summary:
     if: success() || failure()
     runs-on: ubuntu-latest
