@@ -304,5 +304,85 @@ class ClangdNormalizerErrorNormalizationTest(unittest.TestCase):
         self.assertIs(err, orig)
 
 
+class ClangdNormalizerVersionDetectionTest(unittest.TestCase):
+    def test_parses_major_version_from_server_info(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd", "version": "18.1.3"})
+        self.assertEqual(n._major_version, 18)
+        self.assertEqual(n.server_version, "18.1.3")
+
+    def test_parses_version_with_prefix(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd", "version": "22.1.0-rc1"})
+        self.assertEqual(n._major_version, 22)
+
+    def test_no_server_info(self):
+        n = ClangdNormalizer()
+        n.on_server_info(None)
+        self.assertIsNone(n._major_version)
+        self.assertIsNone(n.server_version)
+
+    def test_no_version_in_server_info(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd"})
+        self.assertIsNone(n._major_version)
+
+
+class ClangdNormalizerFeatureSupportTest(unittest.TestCase):
+    def test_outgoing_calls_unsupported_on_v18(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd", "version": "18.1.3"})
+        self.assertFalse(n.supports_method("callHierarchy/outgoingCalls"))
+
+    def test_outgoing_calls_unsupported_on_v19(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd", "version": "19.1.0"})
+        self.assertFalse(n.supports_method("callHierarchy/outgoingCalls"))
+
+    def test_outgoing_calls_supported_on_v20(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd", "version": "20.1.0"})
+        self.assertTrue(n.supports_method("callHierarchy/outgoingCalls"))
+
+    def test_outgoing_calls_supported_on_v22(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd", "version": "22.1.0-rc1"})
+        self.assertTrue(n.supports_method("callHierarchy/outgoingCalls"))
+
+    def test_incoming_calls_supported_on_all_versions(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd", "version": "18.1.3"})
+        self.assertTrue(n.supports_method("callHierarchy/incomingCalls"))
+
+    def test_type_hierarchy_supported_on_all_versions(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd", "version": "18.1.3"})
+        self.assertTrue(n.supports_method("typeHierarchy/supertypes"))
+        self.assertTrue(n.supports_method("typeHierarchy/subtypes"))
+
+    def test_unknown_version_assumes_supported(self):
+        n = ClangdNormalizer()
+        # No server info — unknown version
+        self.assertTrue(n.supports_method("callHierarchy/outgoingCalls"))
+
+    def test_unlisted_method_always_supported(self):
+        n = ClangdNormalizer()
+        n.on_server_info({"name": "clangd", "version": "18.1.3"})
+        self.assertTrue(n.supports_method("textDocument/definition"))
+        self.assertTrue(n.supports_method("textDocument/hover"))
+
+
+class LspNormalizerBaseFeatureSupportTest(unittest.TestCase):
+    def test_base_normalizer_supports_all_methods(self):
+        n = LspNormalizer()
+        self.assertTrue(n.supports_method("callHierarchy/outgoingCalls"))
+        self.assertTrue(n.supports_method("textDocument/definition"))
+
+    def test_base_normalizer_stores_server_version(self):
+        n = LspNormalizer()
+        n.on_server_info({"name": "test-server", "version": "1.2.3"})
+        self.assertEqual(n.server_version, "1.2.3")
+
+
 if __name__ == "__main__":
     unittest.main()

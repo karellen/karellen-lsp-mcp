@@ -25,6 +25,7 @@ LspClient remains generic. LspClient delegates policy decisions
 
 import enum
 import logging
+import re
 import time
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class LspNormalizer:
     def __init__(self):
         self._state = ServerState.STARTING
         self._ready_callback = None
+        self._server_version = None
 
     @property
     def state(self):
@@ -53,6 +55,10 @@ class LspNormalizer:
     def state_name(self):
         return self._state.value
 
+    @property
+    def server_version(self):
+        return self._server_version
+
     def set_ready_callback(self, callback):
         """Set a callback to be invoked when the server becomes ready.
 
@@ -60,6 +66,14 @@ class LspNormalizer:
         set its ready event.
         """
         self._ready_callback = callback
+
+    def on_server_info(self, server_info):
+        """Called with the serverInfo from the initialize response.
+
+        Subclasses can override to extract version information.
+        """
+        if server_info:
+            self._server_version = server_info.get("version")
 
     def on_started(self):
         """Called after the LSP initialize/initialized handshake completes."""
@@ -107,6 +121,14 @@ class LspNormalizer:
         """
         return error
 
+    def supports_method(self, method):
+        """Return True if the LSP server supports the given method.
+
+        Base implementation assumes all methods are supported.
+        Subclasses can override based on detected server version.
+        """
+        return True
+
     @property
     def max_retries(self):
         """Max retry attempts for transient errors during warmup."""
@@ -133,6 +155,7 @@ class ClangdNormalizer(LspNormalizer):
     - Tracks $/progress notifications to detect when indexing completes
     - Classifies clangd-specific transient errors for retry
     - Normalizes LSP JSON-RPC errors into user-friendly messages
+    - Detects clangd version and reports feature availability
     """
 
     # Error message fragments that indicate a transient warmup condition
@@ -144,6 +167,14 @@ class ClangdNormalizer(LspNormalizer):
         "file not found in compilation database",
     )
 
+    # Minimum clangd major version required for each LSP method.
+    # Methods not listed here are assumed supported by all versions.
+    _METHOD_MIN_VERSION = {
+        "callHierarchy/outgoingCalls": 20,
+    }
+
+    _VERSION_RE = re.compile(r"(\d+)\.")
+
     def __init__(self, warmup_timeout=60, max_retries=5, retry_delay=1.0):
         super().__init__()
         self._warmup_timeout = warmup_timeout
@@ -154,6 +185,24 @@ class ClangdNormalizer(LspNormalizer):
         self._saw_any_progress = False
         self._progress = {}  # token -> {title, message, percentage}
         self._completed_progress = []  # [{title, message}]
+        self._major_version = None
+
+    def on_server_info(self, server_info):
+        super().on_server_info(server_info)
+        if self._server_version:
+            m = self._VERSION_RE.search(self._server_version)
+            if m:
+                self._major_version = int(m.group(1))
+                logger.info("Detected clangd major version: %d", self._major_version)
+
+    def supports_method(self, method):
+        min_ver = self._METHOD_MIN_VERSION.get(method)
+        if min_ver is None:
+            return True
+        if self._major_version is None:
+            # Unknown version — assume supported, let runtime error handle it
+            return True
+        return self._major_version >= min_ver
 
     def on_started(self):
         self._start_time = time.monotonic()

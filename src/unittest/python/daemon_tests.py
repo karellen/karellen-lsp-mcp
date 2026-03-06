@@ -16,6 +16,7 @@
 """Unit tests for daemon parsing functions and protocol."""
 
 import asyncio
+import logging
 import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -451,6 +452,16 @@ class FrontendSessionHandleRequestTest(unittest.TestCase):
 
 
 class EnvIntTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._log_handler = logging.StreamHandler()
+        cls._log_handler.setLevel(logging.DEBUG)
+        logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
+
+    @classmethod
+    def tearDownClass(cls):
+        logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
+
     def test_env_int_returns_default(self):
         result = _env_int("LSP_MCP_TEST_NONEXISTENT_VAR_12345", 42)
         self.assertEqual(result, 42)

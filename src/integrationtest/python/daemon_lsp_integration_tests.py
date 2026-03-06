@@ -31,6 +31,7 @@ This simulates how an LLM would use the MCP tools to understand a codebase.
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -315,12 +316,16 @@ class DaemonLspIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _skip_if_no_clangd()
+        cls._log_handler = logging.StreamHandler()
+        cls._log_handler.setLevel(logging.DEBUG)
+        logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
         cls._tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-itest-")
         cls._files = _create_project(cls._tmpdir)
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
 
     def setUp(self):
         self._loop = asyncio.new_event_loop()
@@ -539,12 +544,17 @@ class DaemonLspIntegrationTest(unittest.TestCase):
 
     def test_call_hierarchy_outgoing_for_apply_op(self):
         # What does apply_op() call? -> add() and subtract()
-        result = self._request("lsp_call_hierarchy_outgoing", {
-            "project_id": self._project_id,
-            "file_path": self._files["math_utils.cpp"],
-            "line": 10,
-            "character": 4,
-        })
+        try:
+            result = self._request("lsp_call_hierarchy_outgoing", {
+                "project_id": self._project_id,
+                "file_path": self._files["math_utils.cpp"],
+                "line": 10,
+                "character": 4,
+            })
+        except RuntimeError as e:
+            if "does not support" in str(e):
+                self.skipTest(str(e))
+            raise
         self.assertEqual(result["direction"], "outgoing")
         names = [item["name"] for item in result["items"]]
         has_callees = "add" in names or "subtract" in names
@@ -552,12 +562,17 @@ class DaemonLspIntegrationTest(unittest.TestCase):
 
     def test_call_hierarchy_outgoing_for_main(self):
         # main() calls add, subtract, apply_op, dot_product, print_shape_info, printf
-        result = self._request("lsp_call_hierarchy_outgoing", {
-            "project_id": self._project_id,
-            "file_path": self._files["main.cpp"],
-            "line": 4,
-            "character": 4,
-        })
+        try:
+            result = self._request("lsp_call_hierarchy_outgoing", {
+                "project_id": self._project_id,
+                "file_path": self._files["main.cpp"],
+                "line": 4,
+                "character": 4,
+            })
+        except RuntimeError as e:
+            if "does not support" in str(e):
+                self.skipTest(str(e))
+            raise
         names = [item["name"] for item in result["items"]]
         has_callees = "add" in names or "subtract" in names or "printf" in names
         self.assertTrue(has_callees, "Expected callees in: %s" % names)
@@ -694,12 +709,16 @@ class DaemonMultiFrontendTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _skip_if_no_clangd()
+        cls._log_handler = logging.StreamHandler()
+        cls._log_handler.setLevel(logging.DEBUG)
+        logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
         cls._tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-itest-multi-")
         cls._files = _create_project(cls._tmpdir)
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
 
     def test_two_frontends_share_project(self):
         loop = asyncio.new_event_loop()

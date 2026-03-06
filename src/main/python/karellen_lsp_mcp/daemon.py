@@ -162,11 +162,26 @@ class _FrontendSession:
         "lsp_read_definition", "lsp_hover", "lsp_document_symbols",
     })
 
+    # MCP tool name -> LSP method for feature support checks
+    _LSP_METHOD_MAP = {
+        "lsp_call_hierarchy_outgoing": "callHierarchy/outgoingCalls",
+        "lsp_call_hierarchy_incoming": "callHierarchy/incomingCalls",
+        "lsp_type_hierarchy_supertypes": "typeHierarchy/supertypes",
+        "lsp_type_hierarchy_subtypes": "typeHierarchy/subtypes",
+    }
+
     async def _handle_lsp_request(self, method, params):
         registry = self.daemon.registry
         project_id = params["project_id"]
         entry = registry.get_client(project_id)
         client = entry.client
+
+        # Check version-based feature support before dispatching
+        lsp_method = self._LSP_METHOD_MAP.get(method)
+        if lsp_method and not client.supports_method(lsp_method):
+            raise LspClientError(
+                "This LSP server does not support %s "
+                "(requires a newer version)" % method)
 
         if method in self._SINGLE_FILE_METHODS:
             # Single-file queries work from the AST built on didOpen —

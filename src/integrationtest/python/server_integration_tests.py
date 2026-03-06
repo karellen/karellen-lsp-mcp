@@ -22,6 +22,7 @@ on invalid input.
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -146,37 +147,36 @@ def _create_project(tmpdir):
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Base class for server integration tests
 # ---------------------------------------------------------------------------
 
-class ServerEndToEndTest(unittest.TestCase):
-    """End-to-end tests exercising MCP tool functions through the full stack."""
+class _ServerTestBase(unittest.TestCase):
+    """Base class providing daemon lifecycle, socket patching, and logging setup."""
 
     @classmethod
     def setUpClass(cls):
         _skip_if_no_clangd()
-        cls._tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-e2e-")
-        cls._files = _create_project(cls._tmpdir)
+        # StreamHandler() with no args resolves sys.stderr at emit time,
+        # so PyBuilder's stderr redirection captures the output.
+        cls._log_handler = logging.StreamHandler()
+        cls._log_handler.setLevel(logging.DEBUG)
+        logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
 
     @classmethod
     def tearDownClass(cls):
-        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
 
     def setUp(self):
         self._loop = asyncio.new_event_loop()
-        # Use a temp data dir so we don't collide with a real daemon
         self._daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
         self._sock_patch = unittest.mock.patch(
             "karellen_lsp_mcp.daemon_client.get_socket_path",
             return_value=os.path.join(self._daemon_dir, "daemon.sock"))
         self._sock_patch.start()
-        # Start daemon in-process
         self._daemon = Daemon(idle_timeout=5, data_dir=self._daemon_dir)
         self._daemon_task = self._loop.create_task(self._daemon.run())
-        # Wait for socket
         sock_path = os.path.join(self._daemon_dir, "daemon.sock")
         self._loop.run_until_complete(self._wait_for_socket(sock_path))
-        # Reset server module's client state so it connects fresh
         server_mod._client = None
 
     async def _wait_for_socket(self, sock_path):
@@ -187,14 +187,12 @@ class ServerEndToEndTest(unittest.TestCase):
         raise RuntimeError("Daemon socket did not appear")
 
     def tearDown(self):
-        # Close the server module's client
         if server_mod._client is not None:
             try:
                 self._loop.run_until_complete(server_mod._client.close())
             except Exception:
                 pass
             server_mod._client = None
-        # Shutdown daemon
         self._daemon._shutdown_event.set()
         try:
             self._loop.run_until_complete(
@@ -207,6 +205,25 @@ class ServerEndToEndTest(unittest.TestCase):
 
     def _run(self, coro):
         return self._loop.run_until_complete(coro)
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class ServerEndToEndTest(_ServerTestBase):
+    """End-to-end tests exercising MCP tool functions through the full stack."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-e2e-")
+        cls._files = _create_project(cls._tmpdir)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        super().tearDownClass()
 
     # --- Lifecycle ---
 
@@ -313,8 +330,13 @@ class ServerEndToEndTest(unittest.TestCase):
     def test_call_hierarchy_outgoing_returns_typed_result(self):
         pid = self._register_and_index()
         # main.cpp line 4: "int main() {"
-        result = self._run(server_mod.lsp_call_hierarchy_outgoing(
-            pid, self._files["main.cpp"], 4, 4))
+        try:
+            result = self._run(server_mod.lsp_call_hierarchy_outgoing(
+                pid, self._files["main.cpp"], 4, 4))
+        except Exception as e:
+            if "does not support" in str(e):
+                self.skipTest(str(e))
+            raise
         self.assertIsInstance(result, CallHierarchyResult)
         self.assertEqual(result.direction, "outgoing")
         names = [item.name for item in result.items]
@@ -462,13 +484,13 @@ class ServerEndToEndTest(unittest.TestCase):
         self._run(server_mod.lsp_deregister_project(reg.project_id))
 
 
-class ServerMultiProjectTest(unittest.TestCase):
+class ServerMultiProjectTest(_ServerTestBase):
     """Tests for multiple registrations, refcounting, and garbage collection
     through the MCP tool functions."""
 
     @classmethod
     def setUpClass(cls):
-        _skip_if_no_clangd()
+        super().setUpClass()
         cls._tmpdir1 = tempfile.mkdtemp(prefix="karellen-lsp-mcp-e2e-proj1-")
         cls._tmpdir2 = tempfile.mkdtemp(prefix="karellen-lsp-mcp-e2e-proj2-")
         cls._files1 = _create_project(cls._tmpdir1)
@@ -478,46 +500,7 @@ class ServerMultiProjectTest(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls._tmpdir1, ignore_errors=True)
         shutil.rmtree(cls._tmpdir2, ignore_errors=True)
-
-    def setUp(self):
-        self._loop = asyncio.new_event_loop()
-        self._daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
-        self._sock_patch = unittest.mock.patch(
-            "karellen_lsp_mcp.daemon_client.get_socket_path",
-            return_value=os.path.join(self._daemon_dir, "daemon.sock"))
-        self._sock_patch.start()
-        self._daemon = Daemon(idle_timeout=5, data_dir=self._daemon_dir)
-        self._daemon_task = self._loop.create_task(self._daemon.run())
-        sock_path = os.path.join(self._daemon_dir, "daemon.sock")
-        self._loop.run_until_complete(self._wait_for_socket(sock_path))
-        server_mod._client = None
-
-    async def _wait_for_socket(self, sock_path):
-        for _ in range(50):
-            if os.path.exists(sock_path):
-                return
-            await asyncio.sleep(0.1)
-        raise RuntimeError("Daemon socket did not appear")
-
-    def tearDown(self):
-        if server_mod._client is not None:
-            try:
-                self._loop.run_until_complete(server_mod._client.close())
-            except Exception:
-                pass
-            server_mod._client = None
-        self._daemon._shutdown_event.set()
-        try:
-            self._loop.run_until_complete(
-                asyncio.wait_for(self._daemon_task, timeout=10))
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            pass
-        self._loop.close()
-        self._sock_patch.stop()
-        shutil.rmtree(self._daemon_dir, ignore_errors=True)
-
-    def _run(self, coro):
-        return self._loop.run_until_complete(coro)
+        super().tearDownClass()
 
     def test_same_project_twice_increments_refcount(self):
         reg1 = self._run(server_mod.lsp_register_project(
