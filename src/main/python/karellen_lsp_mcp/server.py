@@ -19,6 +19,7 @@ import atexit
 import asyncio
 import functools
 import logging
+import os
 import signal
 import traceback
 
@@ -75,8 +76,10 @@ atexit.register(_cleanup)
 
 def _handle_signal(signum, frame):
     _cleanup()
+    os._exit(0)
 
 
+signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
 
 
@@ -401,8 +404,12 @@ async def lsp_diagnostics(project_id: str, file_path: str) -> DiagnosticsResult:
 
 
 def _watch_parent():
-    """Background thread: exit when parent process dies."""
-    import os
+    """Background thread: exit when parent process dies.
+
+    anyio.run() overrides SIGTERM handling, so os.kill(SIGTERM) would be
+    swallowed. Instead, call _cleanup() directly and use os._exit(0) to
+    force a clean exit that bypasses the blocked event loop.
+    """
     import threading
     import time
 
@@ -412,8 +419,8 @@ def _watch_parent():
         while True:
             time.sleep(2)
             if os.getppid() != ppid:
-                os.kill(os.getpid(), signal.SIGTERM)
-                return
+                _cleanup()
+                os._exit(0)
 
     t = threading.Thread(target=_monitor, daemon=True)
     t.start()
