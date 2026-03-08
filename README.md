@@ -198,25 +198,7 @@ lsp_register_project(
 )
 ```
 
-### Typical Workflow
-
-1. **Register** the project: `lsp_register_project(project_path=..., language=...)`
-2. **Navigate to definition**: `lsp_read_definition(project_id, file_path, line, character)`
-   to jump to where a symbol is defined
-3. **Find all references**: `lsp_find_references(project_id, file_path, line, character)`
-   to see everywhere a symbol is used
-4. **Get type info**: `lsp_hover(project_id, file_path, line, character)` to see type
-   signatures and documentation
-5. **Understand structure**: `lsp_document_symbols(project_id, file_path)` to see all
-   symbols in a file (functions, classes, variables)
-6. **Trace call chains**: `lsp_call_hierarchy_incoming(...)` to find who calls a function,
-   `lsp_call_hierarchy_outgoing(...)` to find what a function calls
-7. **Explore inheritance**: `lsp_type_hierarchy_supertypes(...)` for base classes,
-   `lsp_type_hierarchy_subtypes(...)` for derived classes
-8. **Check for errors**: `lsp_diagnostics(project_id, file_path)` to see compiler
-   diagnostics without building
-
-### Key Principles
+### Key Rules
 
 - **Use LSP instead of grepping**: `lsp_find_references` is semantically aware — it finds
   actual references, not string matches. It won't return comments, strings, or unrelated
@@ -225,32 +207,19 @@ lsp_register_project(
   for any symbol — often enough to understand usage without reading the full definition
 - **Call hierarchy for impact analysis**: before changing a function, use
   `lsp_call_hierarchy_incoming` to understand all callers that might be affected
-- **All positions are 0-based**: line and character parameters use LSP convention
-  (0-indexed), not editor convention (1-indexed)
-- **Single-file queries skip indexing wait**: `lsp_read_definition`, `lsp_hover`, and
-  `lsp_document_symbols` only wait for the LSP server to finish starting (the
-  initialize handshake), not for background indexing. The LSP server (e.g. clangd)
-  serves them from the AST built on file open. Use these freely even on large
-  codebases that are still indexing
+- **Single-file queries work immediately**: `lsp_read_definition`, `lsp_hover`, and
+  `lsp_document_symbols` don't wait for background indexing. Use these freely even on
+  large codebases that are still indexing
 - **Cross-file queries wait for indexing automatically**: `lsp_find_references`,
-  `lsp_call_hierarchy_incoming`, `lsp_call_hierarchy_outgoing`,
-  `lsp_type_hierarchy_supertypes`, `lsp_type_hierarchy_subtypes`, and `lsp_diagnostics`
-  automatically wait for the LSP server to finish indexing before executing. The wait
-  timeout extends automatically as long as indexing is making progress, so large
-  codebases won't time out prematurely. You don't need to poll or sleep
-- **Check indexing progress on large codebases**: for large projects where indexing may
-  take minutes, use `lsp_indexing_status(project_id)` to check progress before making
-  cross-file queries. It returns the current state, elapsed time, active indexing tasks
-  with percentages, and completed task count — without waiting for readiness
-- **Indexing state**: cross-file queries return an `indexing: true` flag when the LSP
-  server is still building its index — results may be incomplete
-- **Regenerate compile_commands.json after adding C/C++ files**: `compile_commands.json`
-  is a static snapshot of compiler commands. New source files won't be in it, so clangd
-  won't know their flags. After adding `.c`/`.cpp` files to a project, regenerate it
-  (re-run cmake, bear, etc.) and clangd will pick up the changes automatically
+  call hierarchy, type hierarchy, and `lsp_diagnostics` wait for indexing to finish,
+  with the timeout extending automatically as long as progress is being made. No need
+  to poll or sleep. Use `lsp_indexing_status(project_id)` to check progress on large
+  codebases
+- **Regenerate compile_commands.json after adding C/C++ files**: it's a static snapshot
+  of compiler commands. After adding `.c`/`.cpp` files, regenerate it (re-run cmake,
+  bear, etc.) and clangd will pick up the changes automatically
 - **Deregister when done**: `lsp_deregister_project` decrements the refcount; the LSP
-  server shuts down when all sessions deregister. If your session disconnects without
-  deregistering, the daemon handles cleanup automatically
+  server shuts down when all sessions deregister
 ````
 
 ## Available Tools
