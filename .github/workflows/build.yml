@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     continue-on-error: false
     strategy:
       fail-fast: false
@@ -44,18 +46,14 @@ jobs:
       TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - shell: bash
-        if: |
-          github.event_name == 'push' &&
-          contains(env.DEPLOY_OSES, runner.os) &&
-          contains(env.DEPLOY_PYTHONS, matrix.python-version) &&
-          contains(env.DEPLOY_CLANGD, matrix.clangd-version)
-        run: |
-          echo "PYB_EXTRA_ARGS=+upload" >> $GITHUB_ENV
       - uses: pybuilder/build@master
         with:
           python-version: ${{ matrix.python-version }}
-          pyb-extra-args: ${{ env.PYB_EXTRA_ARGS }}
+          is-upload: >-
+            ${{ github.event_name == 'push'
+            && contains(env.DEPLOY_OSES, runner.os)
+            && contains(env.DEPLOY_PYTHONS, matrix.python-version)
+            && contains(env.DEPLOY_CLANGD, matrix.clangd-version) }}
           pre-build: |
             pip install --pre "karellen-llvm-clang>=${{ matrix.clangd-version }},<$(( ${{ matrix.clangd-version }} + 1 ))"
             python -c pass
