@@ -125,10 +125,47 @@ class _FrontendSession:
     async def _handle_method(self, method, params):
         registry = self.daemon.registry
 
-        if method == "register_project":
+        if method == "detect_project":
+            from karellen_lsp_mcp.project_detector import detect_project
+            detection = await detect_project(
+                params["project_path"],
+                allow_active=params.get("allow_active", False),
+            )
+            return _serialize_detection_result(detection)
+
+        elif method == "register_project":
+            language = params.get("language")
+            project_path = params["project_path"]
+
+            if language is None or language == "auto":
+                from karellen_lsp_mcp.project_detector import detect_project
+                detection = await detect_project(
+                    project_path,
+                    allow_active=params.get("allow_active", False),
+                )
+                if not detection.languages:
+                    raise ProjectRegistryError(
+                        "No languages detected for %s" % project_path)
+                project_ids = []
+                for lang_det in detection.languages:
+                    bi = dict(params.get("build_info") or {})
+                    bi.update(lang_det.build_info)
+                    pid = await registry.register(
+                        project_path=lang_det.workspace_root or project_path,
+                        language=lang_det.language,
+                        lsp_command=lang_det.lsp_command or params.get("lsp_command"),
+                        build_info=bi,
+                        force=params.get("force", False),
+                    )
+                    self.registered_projects.add(pid)
+                    project_ids.append(pid)
+                if len(project_ids) == 1:
+                    return {"project_id": project_ids[0]}
+                return {"project_ids": project_ids}
+
             project_id = await registry.register(
-                project_path=params["project_path"],
-                language=params["language"],
+                project_path=project_path,
+                language=language,
                 lsp_command=params.get("lsp_command"),
                 build_info=params.get("build_info"),
                 force=params.get("force", False),
@@ -483,6 +520,30 @@ def _parse_diagnostics(diags, indexing=False):
     if indexing:
         result_dict["indexing"] = True
     return result_dict
+
+
+def _serialize_detection_result(detection):
+    """Convert a DetectionResult to a JSON-serializable dict."""
+    languages = []
+    for lang in detection.languages:
+        entry = {
+            "language": lang.language,
+            "build_info": lang.build_info,
+            "confidence": lang.confidence,
+            "notes": lang.notes,
+        }
+        if lang.lsp_command:
+            entry["lsp_command"] = lang.lsp_command
+        if lang.source:
+            entry["source"] = lang.source.value
+        if lang.workspace_root:
+            entry["workspace_root"] = lang.workspace_root
+        languages.append(entry)
+    return {
+        "project_path": detection.project_path,
+        "languages": languages,
+        "errors": detection.errors,
+    }
 
 
 # ---------------------------------------------------------------------------

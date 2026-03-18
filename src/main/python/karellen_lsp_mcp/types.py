@@ -130,3 +130,21 @@ class IndexingStatusResult:
 @dataclass
 class StringResult:
     result: str
+
+
+@dataclass
+class DetectedLanguage:
+    language: str
+    build_info: dict = field(default_factory=dict)
+    lsp_command: list[str] | None = None
+    source: Optional[str] = None
+    confidence: float = 1.0
+    workspace_root: Optional[str] = None
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DetectResult:
+    project_path: str
+    languages: list[DetectedLanguage] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)

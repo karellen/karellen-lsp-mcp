@@ -252,6 +252,8 @@ class LspClient:
                 ".py": "python",
                 ".rs": "rust",
                 ".java": "java",
+                ".kt": "kotlin", ".kts": "kotlin",
+                ".scala": "scala",
                 ".js": "javascript",
                 ".ts": "typescript",
                 ".go": "go",

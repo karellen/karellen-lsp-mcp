@@ -31,7 +31,7 @@ from karellen_lsp_mcp.types import (
     LocationResult, Location, HoverResult, DocumentSymbolsResult, SymbolInfo,
     CallHierarchyResult, CallHierarchyItem, TypeHierarchyResult, TypeHierarchyItem,
     DiagnosticsResult, Diagnostic, ProjectInfo, RegisterResult, StringResult,
-    IndexingStatusResult, IndexingTask,
+    IndexingStatusResult, IndexingTask, DetectedLanguage, DetectResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -160,30 +160,69 @@ def _to_diagnostics_result(data):
 
 @mcp.tool()
 @_tag_errors
-async def lsp_register_project(project_path: str, language: str,
+async def lsp_detect_project(project_path: str,
+                             allow_active: bool = False) -> DetectResult:
+    """Detect project languages and build configurations without registering.
+
+    Inspects IDE metadata files (CLion, VS Code, IntelliJ, Eclipse), build system
+    artifacts (compile_commands.json, pom.xml, build.gradle), and optionally runs
+    build tool commands for deeper detection.
+
+    Args:
+        project_path: Absolute path to the project root directory.
+        allow_active: If True, run build tool commands (cmake, meson, mvn, gradle)
+                      to generate or query build configuration. Default False.
+    """
+    result = await _request("detect_project", {
+        "project_path": project_path,
+        "allow_active": allow_active,
+    })
+    languages = [DetectedLanguage(
+        language=lang["language"],
+        build_info=lang.get("build_info", {}),
+        lsp_command=lang.get("lsp_command"),
+        source=lang.get("source"),
+        confidence=lang.get("confidence", 1.0),
+        workspace_root=lang.get("workspace_root"),
+        notes=lang.get("notes", []),
+    ) for lang in result.get("languages", [])]
+    return DetectResult(
+        project_path=result["project_path"],
+        languages=languages,
+        errors=result.get("errors", []),
+    )
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_register_project(project_path: str, language: str = None,
                                lsp_command: list[str] = None,
                                build_info: dict = None,
                                force: bool = False) -> RegisterResult:
     """Register a project for LSP analysis. Returns a project_id for subsequent queries.
 
     Multiple sessions sharing the same project_path + language get the same LSP server instance.
+    When language is omitted, auto-detects the project language and build configuration.
 
     Args:
         project_path: Absolute path to the project root directory.
-        language: Language identifier (e.g. "c", "cpp", "python", "rust").
+        language: Language identifier (e.g. "c", "cpp", "java"). If omitted,
+                  auto-detects from IDE metadata and build system files.
         lsp_command: Custom LSP server command (e.g. ["clangd", "--background-index"]).
                      If omitted, uses the default for the language.
         build_info: Optional build configuration dict. For C/C++:
                     compile_commands_dir, build_dir, compiler_flags.
         force: If true, kill any existing LSP server for this project and start fresh.
     """
-    result = await _request("register_project", {
+    params = {
         "project_path": project_path,
-        "language": language,
         "lsp_command": lsp_command,
         "build_info": build_info,
         "force": force,
-    })
+    }
+    if language is not None:
+        params["language"] = language
+    result = await _request("register_project", params)
     return RegisterResult(project_id=result["project_id"])
 
 

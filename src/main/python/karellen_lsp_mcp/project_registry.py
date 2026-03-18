@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_LSP_COMMANDS = {
     "c": ["clangd"],
     "cpp": ["clangd"],
+    "java": ["jdtls"],
 }
 
 
@@ -74,6 +75,12 @@ def _build_lsp_command(language, lsp_command, build_info):
             if os.path.exists(cc_path):
                 cmd.append("--compile-commands-dir=%s" % bi["build_dir"])
 
+    cmd_basename = os.path.basename(cmd[0])
+    if language == "java" and cmd_basename in ("jdtls", "jdtls.sh", "jdtls.bat"):
+        bi = build_info or {}
+        if bi.get("data_dir"):
+            cmd.extend(["-data", bi["data_dir"]])
+
     return cmd
 
 
@@ -94,6 +101,17 @@ class ProjectRegistry:
             raise ProjectRegistryError("Project path does not exist: %s" % real_path)
 
         language = language.lower()
+
+        if language == "java":
+            build_info = dict(build_info or {})
+            if not build_info.get("data_dir"):
+                data_dir = os.path.join(
+                    os.path.expanduser("~"), ".local", "share",
+                    "karellen-lsp-mcp", "jdtls-data",
+                    _compute_project_id(real_path, language))
+                os.makedirs(data_dir, exist_ok=True)
+                build_info["data_dir"] = data_dir
+
         project_id = _compute_project_id(real_path, language)
 
         async with self._lock:
