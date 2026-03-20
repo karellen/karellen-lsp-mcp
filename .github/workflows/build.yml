@@ -54,6 +54,8 @@ jobs:
             && contains(env.DEPLOY_OSES, runner.os)
             && contains(env.DEPLOY_PYTHONS, matrix.python-version)
             && contains(env.DEPLOY_CLANGD, matrix.clangd-version) }}
+          release-app-id: ${{ secrets.PYBUILDER_RELEASE_APP_ID }}
+          release-app-private-key: ${{ secrets.PYBUILDER_RELEASE_APP_PRIVATE_KEY }}
           pre-build: |
             pip install --pre "karellen-llvm-clang>=${{ matrix.clangd-version }},<$(( ${{ matrix.clangd-version }} + 1 ))"
             python -c pass
