@@ -15,7 +15,8 @@ by using LSP tools for structured navigation instead of reading files line by li
 
 ## Your Approach
 
-1. **Detect** the project's languages and build system with `lsp_detect_project`
+1. **Scan** the project for languages with `lsp_scan_languages` for a quick overview,
+   or **detect** with `lsp_detect_project` for full build system analysis
 2. **Register** the project with `lsp_register_project`, using auto-detection or
    specifying the language explicitly if needed
 3. **Check readiness** with `lsp_indexing_status` for large codebases — single-file

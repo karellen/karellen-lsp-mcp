@@ -251,6 +251,7 @@ lsp_register_project(
 ### Project Lifecycle
 | Tool | Description |
 |------|-------------|
+| `lsp_scan_languages` | Scan project for file extensions and recommend LSP registrations. Lightweight alternative to detect. |
 | `lsp_register_project` | Register a project for LSP analysis. Returns a project_id. Multiple sessions sharing the same project get the same LSP server. |
 | `lsp_deregister_project` | Deregister a project. Decrements refcount; stops LSP server at 0. |
 | `lsp_list_projects` | List all registered projects with status, refcounts, and paths. |

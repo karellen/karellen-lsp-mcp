@@ -18,6 +18,14 @@ chains, find all usages of a symbol, or check compiler diagnostics across a code
 
 ### 1. Register the Project
 
+Optionally scan first to see what languages are present:
+
+```
+lsp_scan_languages(project_path="/path/to/project")
+```
+
+Then register:
+
 ```
 lsp_register_project(project_path="/path/to/project")
 ```

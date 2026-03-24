@@ -142,7 +142,11 @@ class _FrontendSession:
     async def _handle_method(self, method, params):
         registry = self.daemon.registry
 
-        if method == "detect_project":
+        if method == "scan_languages":
+            from karellen_lsp_mcp.detector import scan_languages
+            return scan_languages(params["project_path"])
+
+        elif method == "detect_project":
             from karellen_lsp_mcp.detector import detect_project
             result = detect_project(params["project_path"])
             return _serialize_detection_result(result)

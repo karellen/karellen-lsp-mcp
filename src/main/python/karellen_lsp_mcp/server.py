@@ -34,6 +34,7 @@ from karellen_lsp_mcp.types import (
     WorkspaceSymbolsResult, WorkspaceSymbolInfo,
     DiagnosticsResult, Diagnostic, ProjectInfo, RegisterResult, StringResult,
     IndexingStatusResult, IndexingTask, DetectedLanguageInfo, DetectResult,
+    ScannedLanguageInfo, ScanResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -201,6 +202,34 @@ def _to_diagnostics_result(data):
 
 
 # --- Lifecycle Tools ---
+
+@mcp.tool()
+@_tag_errors
+async def lsp_scan_languages(project_path: str) -> ScanResult:
+    """Scan a project directory for source file types and recommend LSP registrations.
+
+    A lightweight alternative to lsp_detect_project — simply counts file extensions
+    and maps them to known languages. Use this for a quick overview of what languages
+    are present before deciding which to register. Does not analyze build systems
+    or IDE metadata.
+
+    Args:
+        project_path: Absolute path to the project root directory.
+    """
+    result = await _request("scan_languages", {"project_path": project_path})
+    languages = [ScannedLanguageInfo(
+        language=lang["language"],
+        label=lang["label"],
+        extensions=lang["extensions"],
+        file_count=lang["file_count"],
+        adapter_available=lang.get("adapter_available", False),
+        server_available=lang.get("server_available", False),
+        install_hint=lang.get("install_hint"),
+    ) for lang in result.get("languages", [])]
+    return ScanResult(project_path=result["project_path"],
+                      languages=languages,
+                      total_files=result.get("total_files", 0))
+
 
 @mcp.tool()
 @_tag_errors

@@ -17,16 +17,22 @@ all `lsp_*` query tools become available for that project.
 
 ## Workflow
 
-### 1. Detect the Project (Optional)
+### 1. Scan or Detect the Project (Optional)
 
-Scan the project to see what languages and build systems are present:
+Quick scan — count file extensions and see what languages are present:
+
+```
+lsp_scan_languages(project_path="/path/to/project")
+```
+
+Full detection — analyze build systems, IDE metadata, and configuration:
 
 ```
 lsp_detect_project(project_path="/path/to/project")
 ```
 
-This returns detected languages with build system, confidence, and configuration details
-without registering anything. Useful for understanding what auto-detection will do.
+Both return language recommendations without registering anything.
+Use scan for a quick overview, detect for build system details and configuration.
 
 ### 2. Register the Project
 

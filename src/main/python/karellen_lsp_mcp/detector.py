@@ -924,3 +924,134 @@ class CppDetector(ProjectDetector):
 # Register detectors
 register_detector(JavaKotlinDetector())
 register_detector(CppDetector())
+
+
+# ---------------------------------------------------------------------------
+# Lightweight extension-based language scan
+# ---------------------------------------------------------------------------
+
+# Extension -> (language, label)
+_EXT_LANGUAGE_MAP = {
+    ".c": ("c", "C"),
+    ".h": ("c", "C/C++ header"),
+    ".cpp": ("c", "C++"),
+    ".cxx": ("c", "C++"),
+    ".cc": ("c", "C++"),
+    ".hh": ("c", "C++ header"),
+    ".hpp": ("c", "C++ header"),
+    ".hxx": ("c", "C++ header"),
+    ".java": ("java", "Java"),
+    ".kt": ("kotlin", "Kotlin"),
+    ".kts": ("kotlin", "Kotlin script"),
+    ".scala": ("scala", "Scala"),
+    ".groovy": ("groovy", "Groovy"),
+    ".py": ("python", "Python"),
+    ".pyx": ("python", "Cython"),
+    ".rs": ("rust", "Rust"),
+    ".go": ("go", "Go"),
+    ".ts": ("typescript", "TypeScript"),
+    ".tsx": ("typescript", "TypeScript/React"),
+    ".js": ("javascript", "JavaScript"),
+    ".jsx": ("javascript", "JavaScript/React"),
+    ".rb": ("ruby", "Ruby"),
+    ".cs": ("csharp", "C#"),
+    ".fs": ("fsharp", "F#"),
+    ".swift": ("swift", "Swift"),
+    ".m": ("objc", "Objective-C"),
+    ".mm": ("objc", "Objective-C++"),
+    ".lua": ("lua", "Lua"),
+    ".zig": ("zig", "Zig"),
+    ".v": ("verilog", "Verilog"),
+    ".sv": ("systemverilog", "SystemVerilog"),
+    ".proto": ("protobuf", "Protocol Buffers"),
+}
+
+_SKIP_DIRS = frozenset({
+    ".git", ".svn", ".hg", ".bzr",
+    "node_modules", "__pycache__", ".tox", ".venv", "venv",
+    "build", "dist", "target", "out", "bin", "obj",
+    ".idea", ".vscode", ".eclipse", ".settings",
+    ".gradle", ".mvn", ".cargo",
+})
+
+
+def scan_languages(project_path, max_files=50000):
+    """Scan a project for file extensions and recommend LSP registrations.
+
+    Returns a dict with:
+      - languages: list of {language, label, extensions, file_count,
+                            adapter_available, install_hint}
+      - total_files: number of files scanned
+      - skipped_dirs: directories skipped during scan
+    """
+    from karellen_lsp_mcp.lsp_adapter import get_adapter
+
+    real_path = os.path.realpath(project_path)
+    ext_counts = {}  # extension -> count
+    total_files = 0
+
+    for dirpath, dirnames, filenames in os.walk(real_path):
+        # Prune skipped directories in-place
+        dirnames[:] = [d for d in dirnames
+                       if d not in _SKIP_DIRS and not d.startswith(".")]
+
+        for fname in filenames:
+            total_files += 1
+            if total_files > max_files:
+                break
+            _, ext = os.path.splitext(fname)
+            if ext:
+                ext_counts[ext.lower()] = ext_counts.get(
+                    ext.lower(), 0) + 1
+        if total_files > max_files:
+            break
+
+    # Group by canonical language
+    lang_info = {}  # language -> {label, extensions, file_count}
+    for ext, count in ext_counts.items():
+        entry = _EXT_LANGUAGE_MAP.get(ext)
+        if entry is None:
+            continue
+        language, label = entry
+        if language not in lang_info:
+            lang_info[language] = {
+                "label": label,
+                "extensions": [],
+                "file_count": 0,
+            }
+        info = lang_info[language]
+        info["extensions"].append(ext)
+        info["file_count"] += count
+        # Use most specific label (prefer "C++" over "C/C++ header")
+        if "header" not in label:
+            info["label"] = label
+
+    # Build recommendations sorted by file count
+    recommendations = []
+    for language, info in sorted(lang_info.items(),
+                                 key=lambda x: -x[1]["file_count"]):
+        adapter = get_adapter(language)
+        rec = {
+            "language": language,
+            "label": info["label"],
+            "extensions": sorted(info["extensions"]),
+            "file_count": info["file_count"],
+            "adapter_available": adapter is not None,
+        }
+        if adapter is not None:
+            available, hint = adapter.check_server()
+            rec["server_available"] = available
+            if hint:
+                rec["install_hint"] = hint
+        else:
+            rec["server_available"] = False
+            rec["install_hint"] = ("No built-in adapter. Use "
+                                   "lsp_register_project with explicit "
+                                   "lsp_command.")
+        recommendations.append(rec)
+
+    return {
+        "project_path": real_path,
+        "languages": recommendations,
+        "total_files": min(total_files, max_files),
+    }

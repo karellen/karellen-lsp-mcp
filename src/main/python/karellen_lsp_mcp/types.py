@@ -192,6 +192,24 @@ class DetectedLanguageInfo:
 
 
 @dataclass
+class ScannedLanguageInfo:
+    language: str
+    label: str
+    extensions: list[str]
+    file_count: int
+    adapter_available: bool = False
+    server_available: bool = False
+    install_hint: Optional[str] = None
+
+
+@dataclass
+class ScanResult:
+    project_path: str
+    languages: list[ScannedLanguageInfo] = field(default_factory=list)
+    total_files: int = 0
+
+
+@dataclass
 class DetectResult:
     project_path: str
     languages: list[DetectedLanguageInfo] = field(default_factory=list)
