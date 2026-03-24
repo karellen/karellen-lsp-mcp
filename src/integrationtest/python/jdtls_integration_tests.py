@@ -26,6 +26,7 @@ import shutil
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 
 from karellen_lsp_mcp.daemon import Daemon, _read_message, _write_message
 
@@ -129,12 +130,19 @@ class _DaemonTestHelper:
         self.daemon = None
         self._daemon_task = None
         self._daemon_dir = None
+        self._data_dir = None
+        self._data_patch = None
         self._reader = None
         self._writer = None
         self._msg_id = 0
 
     async def start(self):
         self._daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-jdtls-")
+        self._data_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-data-")
+        self._data_patch = unittest.mock.patch(
+            "karellen_lsp_mcp.lsp_adapter._user_data_dir",
+            return_value=self._data_dir)
+        self._data_patch.start()
         self.daemon = Daemon(idle_timeout=5, runtime_dir=self._daemon_dir)
         self._daemon_task = asyncio.create_task(self.daemon.run())
         sock_path = os.path.join(self._daemon_dir, "daemon.sock")
@@ -162,8 +170,12 @@ class _DaemonTestHelper:
                 await asyncio.wait_for(self._daemon_task, timeout=30)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
+        if self._data_patch:
+            self._data_patch.stop()
         if self._daemon_dir:
             shutil.rmtree(self._daemon_dir, ignore_errors=True)
+        if self._data_dir:
+            shutil.rmtree(self._data_dir, ignore_errors=True)
 
     async def request(self, method, params=None):
         self._msg_id += 1

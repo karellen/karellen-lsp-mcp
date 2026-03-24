@@ -17,6 +17,7 @@
 
 import asyncio
 import os
+import shutil
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -72,6 +73,15 @@ class AdapterRegistryTest(unittest.TestCase):
 class ClangdAdapterTest(unittest.TestCase):
     def setUp(self):
         self.adapter = ClangdAdapter()
+        self._data_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-test-data-")
+        self._data_patch = unittest.mock.patch(
+            "karellen_lsp_mcp.lsp_adapter._user_data_dir",
+            return_value=self._data_dir)
+        self._data_patch.start()
+
+    def tearDown(self):
+        self._data_patch.stop()
+        shutil.rmtree(self._data_dir, ignore_errors=True)
 
     def test_default_command(self):
         config = self.adapter.configure("/project", "c")
@@ -142,6 +152,15 @@ class ClangdAdapterTest(unittest.TestCase):
 class JdtlsAdapterTest(unittest.TestCase):
     def setUp(self):
         self.adapter = JdtlsAdapter()
+        self._data_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-test-data-")
+        self._data_patch = unittest.mock.patch(
+            "karellen_lsp_mcp.lsp_adapter._user_data_dir",
+            return_value=self._data_dir)
+        self._data_patch.start()
+
+    def tearDown(self):
+        self._data_patch.stop()
+        shutil.rmtree(self._data_dir, ignore_errors=True)
 
     @unittest.mock.patch("karellen_lsp_mcp.lsp_adapter._shutil.which", return_value="/usr/bin/jdtls")
     def test_default_command(self, mock_which):

@@ -165,6 +165,11 @@ class _ServerTestBase(unittest.TestCase):
         logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
         cls._loop = asyncio.new_event_loop()
         cls._daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
+        cls._data_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-data-")
+        cls._data_patch = unittest.mock.patch(
+            "karellen_lsp_mcp.lsp_adapter._user_data_dir",
+            return_value=cls._data_dir)
+        cls._data_patch.start()
         cls._sock_patch = unittest.mock.patch(
             "karellen_lsp_mcp.daemon_client.get_socket_path",
             return_value=os.path.join(cls._daemon_dir, "daemon.sock"))
@@ -199,7 +204,9 @@ class _ServerTestBase(unittest.TestCase):
             pass
         cls._loop.close()
         cls._sock_patch.stop()
+        cls._data_patch.stop()
         shutil.rmtree(cls._daemon_dir, ignore_errors=True)
+        shutil.rmtree(cls._data_dir, ignore_errors=True)
         logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
 
     def _run(self, coro):
