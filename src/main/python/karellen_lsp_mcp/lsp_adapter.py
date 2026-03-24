@@ -31,13 +31,19 @@ from platformdirs import user_data_dir as _user_data_dir
 logger = logging.getLogger(__name__)
 
 
-def _managed_dir(subdir, project_path):
-    """Return a per-project managed directory under the platform data dir.
+def _project_managed_dir(project_path, adapter_name):
+    """Return a per-project, per-adapter managed directory.
 
-    Structure: <user_data_dir>/karellen-lsp-mcp/{subdir}/{hash}/
+    Structure: <user_data_dir>/karellen-lsp-mcp/projects/{name}-{hash}/{adapter_name}/
+
+    Uses the project directory basename for readability, with a short hash
+    suffix for uniqueness when two projects share the same basename.
     """
-    h = hashlib.sha256(project_path.encode("utf-8")).hexdigest()[:16]
-    return os.path.join(_user_data_dir("karellen-lsp-mcp"), subdir, h)
+    name = os.path.basename(project_path) or "root"
+    h = hashlib.sha256(project_path.encode("utf-8")).hexdigest()[:8]
+    project_dir = "%s-%s" % (name, h)
+    return os.path.join(_user_data_dir("karellen-lsp-mcp"),
+                        "projects", project_dir, adapter_name)
 
 
 class LspAdapterConfig:
@@ -142,7 +148,7 @@ class ClangdAdapter(LspAdapter):
         to a managed dir, or generates one via cmake/meson and copies it.
         Returns the managed directory path, or None.
         """
-        managed = _managed_dir("compile-commands", project_path)
+        managed = _project_managed_dir(project_path, "clangd")
 
         # 1. Explicit from build_info — copy to managed dir
         source_dir = build_info.get("compile_commands_dir")
@@ -299,7 +305,8 @@ class ClangdAdapter(LspAdapter):
 
 def _jdtls_workspace_dir(project_path):
     """Generate a per-project jdtls workspace directory path."""
-    return _managed_dir("jdtls-workspaces", project_path)
+    return os.path.join(_project_managed_dir(project_path, "jdtls"),
+                        "workspace")
 
 
 class JdtlsAdapter(LspAdapter):

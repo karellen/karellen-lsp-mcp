@@ -45,7 +45,7 @@ find configured build directories (both in-tree and out-of-tree). From
 ## ClangdAdapter — Compile Database Generation
 
 The adapter never writes to the project tree. All generated files go to
-a platform-specific data directory (`compile-commands/{hash}/` under the
+a platform-specific data directory (`projects/{hash}/clangd/` under the
 user data dir determined by [platformdirs](https://pypi.org/project/platformdirs/)).
 
 ### Resolution order
