@@ -260,13 +260,17 @@ lsp_register_project(
 | Tool | Description |
 |------|-------------|
 | `lsp_read_definition` | Go to definition of symbol at position. |
+| `lsp_read_declaration` | Go to declaration (e.g., header in C/C++, interface in Java). |
+| `lsp_read_type_definition` | Go to the type definition of a variable/expression. |
 | `lsp_find_references` | Find all references to symbol at position. |
+| `lsp_find_implementations` | Find all implementations of an interface/abstract method. |
 | `lsp_hover` | Get type signature and documentation for symbol at position. |
 
 ### Symbols and Structure
 | Tool | Description |
 |------|-------------|
 | `lsp_document_symbols` | List all symbols (functions, classes, variables, etc.) in a file. |
+| `lsp_workspace_symbols` | Search for symbols across the entire project by name or pattern. |
 | `lsp_call_hierarchy_incoming` | Find all callers of function/method at position (single level). |
 | `lsp_call_hierarchy_outgoing` | Find all functions/methods called by function at position (single level). |
 | `lsp_call_tree_incoming` | Recursively find all callers, returning a full tree (configurable depth, default 20). |

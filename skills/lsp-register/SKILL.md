@@ -114,9 +114,13 @@ lsp_indexing_status(project_id="<id>")
 All queries use the `project_id` returned by registration:
 
 - `lsp_read_definition` — go to definition
+- `lsp_read_declaration` — go to declaration (header/interface)
+- `lsp_read_type_definition` — go to the type definition of a variable
 - `lsp_find_references` — find all references
+- `lsp_find_implementations` — find all implementations of interface/abstract
 - `lsp_hover` — type signature and documentation
 - `lsp_document_symbols` — list symbols in a file
+- `lsp_workspace_symbols` — search symbols across the project by name
 - `lsp_call_tree_incoming` / `lsp_call_tree_outgoing` — recursive call trees (preferred)
 - `lsp_call_hierarchy_incoming` / `lsp_call_hierarchy_outgoing` — single-level call chains
 - `lsp_type_tree_supertypes` / `lsp_type_tree_subtypes` — recursive type trees (preferred)

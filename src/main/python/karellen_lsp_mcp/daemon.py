@@ -220,7 +220,9 @@ class _FrontendSession:
     # Single-file queries work immediately from clangd's AST built on
     # didOpen — no need to wait for background indexing.
     _SINGLE_FILE_METHODS = frozenset({
-        "lsp_read_definition", "lsp_hover", "lsp_document_symbols",
+        "lsp_read_definition", "lsp_read_declaration",
+        "lsp_read_type_definition",
+        "lsp_hover", "lsp_document_symbols",
     })
 
     # MCP tool name -> LSP method for feature support checks
@@ -284,7 +286,9 @@ class _FrontendSession:
 
         indexing = client.state == ServerState.INDEXING
 
-        if method in ("lsp_read_definition", "lsp_find_references", "lsp_hover",
+        if method in ("lsp_read_definition", "lsp_read_declaration",
+                      "lsp_find_implementations", "lsp_read_type_definition",
+                      "lsp_find_references", "lsp_hover",
                       "lsp_call_hierarchy_incoming", "lsp_call_hierarchy_outgoing",
                       "lsp_type_hierarchy_supertypes", "lsp_type_hierarchy_subtypes",
                       "lsp_call_tree_incoming", "lsp_call_tree_outgoing",
@@ -296,6 +300,20 @@ class _FrontendSession:
 
             if method == "lsp_read_definition":
                 result = await client.definition(file_uri, line, character)
+                return _parse_locations(result, indexing=False)
+
+            elif method == "lsp_read_declaration":
+                result = await client.declaration(file_uri, line, character)
+                return _parse_locations(result, indexing=False)
+
+            elif method == "lsp_find_implementations":
+                result = await client.implementation(
+                    file_uri, line, character)
+                return _parse_locations(result, indexing=indexing)
+
+            elif method == "lsp_read_type_definition":
+                result = await client.type_definition(
+                    file_uri, line, character)
                 return _parse_locations(result, indexing=False)
 
             elif method == "lsp_find_references":
@@ -419,6 +437,11 @@ class _FrontendSession:
             await client.ensure_file_open(file_uri)
             diags = client.get_diagnostics(file_uri)
             return _parse_diagnostics(diags, indexing=indexing)
+
+        elif method == "lsp_workspace_symbols":
+            query = params.get("query", "")
+            result = await client.workspace_symbol(query)
+            return _parse_workspace_symbols(result, indexing=indexing)
 
         else:
             raise ProjectRegistryError("Unknown LSP method: %s" % method)
@@ -716,6 +739,34 @@ async def _walk_type_tree(client, node, lsp_item, direction,
                             depth - 1, visited, sem)
             for c, ri in expand
         ))
+
+
+def _parse_workspace_symbols(result, indexing=False):
+    """Parse workspace/symbol results into structured dicts."""
+    symbols = []
+    if result:
+        for sym in result:
+            kind_num = sym.get("kind", 0)
+            loc = sym.get("location", {})
+            uri = loc.get("uri", "")
+            rng = loc.get("range", {})
+            start = rng.get("start", {})
+            entry = {
+                "name": sym.get("name", "?"),
+                "kind": _SYMBOL_KIND_NAMES.get(kind_num,
+                                               "Unknown(%d)" % kind_num),
+                "file": _uri_to_path(uri),
+                "line": start.get("line", 0) + 1,
+            }
+            container = sym.get("containerName")
+            if container:
+                entry["container"] = container
+            symbols.append(entry)
+
+    result_dict = {"symbols": symbols}
+    if indexing:
+        result_dict["indexing"] = True
+    return result_dict
 
 
 _DIAG_SEVERITY = {1: "Error", 2: "Warning", 3: "Information", 4: "Hint"}

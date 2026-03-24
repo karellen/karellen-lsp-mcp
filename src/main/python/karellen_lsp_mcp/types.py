@@ -117,6 +117,21 @@ class TypeTreeResult:
 
 
 @dataclass
+class WorkspaceSymbolInfo:
+    name: str
+    kind: str
+    file: str
+    line: int
+    container: Optional[str] = None
+
+
+@dataclass
+class WorkspaceSymbolsResult:
+    symbols: list[WorkspaceSymbolInfo]
+    indexing: bool = False
+
+
+@dataclass
 class Diagnostic:
     line: int
     character: int

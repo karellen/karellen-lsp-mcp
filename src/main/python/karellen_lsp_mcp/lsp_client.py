@@ -105,31 +105,85 @@ class LspClient:
 
         self._reader_task = asyncio.create_task(self._read_loop())
 
+        _all_symbol_kinds = list(types.SymbolKind)
+        _symbol_tags = [types.SymbolTag.Deprecated]
+        _diag_tags = [types.DiagnosticTag.Unnecessary,
+                      types.DiagnosticTag.Deprecated]
+
         init_params = types.InitializeParams(
             process_id=None,
             root_uri=root_uri,
             root_path=root_path,
             capabilities=types.ClientCapabilities(
+                general=types.GeneralClientCapabilities(
+                    position_encodings=[
+                        types.PositionEncodingKind.Utf32,
+                        types.PositionEncodingKind.Utf16,
+                    ],
+                    markdown=types.MarkdownClientCapabilities(
+                        parser="markdown", version="1.0"),
+                ),
                 window=types.WindowClientCapabilities(
                     work_done_progress=True,
+                    show_message=types.ShowMessageRequestClientCapabilities(),
+                    show_document=types.ShowDocumentClientCapabilities(
+                        support=True),
+                ),
+                workspace=types.WorkspaceClientCapabilities(
+                    configuration=True,
+                    workspace_folders=True,
+                    symbol=types.WorkspaceSymbolClientCapabilities(
+                        dynamic_registration=False,
+                        symbol_kind=types.ClientSymbolKindOptions(
+                            value_set=_all_symbol_kinds),
+                        tag_support=types.ClientSymbolTagOptions(
+                            value_set=_symbol_tags),
+                    ),
                 ),
                 text_document=types.TextDocumentClientCapabilities(
                     definition=types.DefinitionClientCapabilities(
                         dynamic_registration=False,
+                        link_support=True,
+                    ),
+                    declaration=types.DeclarationClientCapabilities(
+                        dynamic_registration=False,
+                        link_support=True,
+                    ),
+                    implementation=types.ImplementationClientCapabilities(
+                        dynamic_registration=False,
+                        link_support=True,
+                    ),
+                    type_definition=types.TypeDefinitionClientCapabilities(
+                        dynamic_registration=False,
+                        link_support=True,
                     ),
                     references=types.ReferenceClientCapabilities(
                         dynamic_registration=False,
                     ),
                     hover=types.HoverClientCapabilities(
                         dynamic_registration=False,
-                        content_format=[types.MarkupKind.Markdown, types.MarkupKind.PlainText],
+                        content_format=[types.MarkupKind.Markdown,
+                                        types.MarkupKind.PlainText],
                     ),
                     document_symbol=types.DocumentSymbolClientCapabilities(
                         dynamic_registration=False,
                         hierarchical_document_symbol_support=True,
+                        symbol_kind=types.ClientSymbolKindOptions(
+                            value_set=_all_symbol_kinds),
+                        tag_support=types.ClientSymbolTagOptions(
+                            value_set=_symbol_tags),
+                    ),
+                    document_highlight=types.DocumentHighlightClientCapabilities(
+                        dynamic_registration=False,
                     ),
                     publish_diagnostics=types.PublishDiagnosticsClientCapabilities(
                         related_information=True,
+                        tag_support=types.ClientDiagnosticsTagOptions(
+                            value_set=_diag_tags),
+                        code_description_support=True,
+                    ),
+                    diagnostic=types.DiagnosticClientCapabilities(
+                        dynamic_registration=False,
                     ),
                     call_hierarchy=types.CallHierarchyClientCapabilities(
                         dynamic_registration=False,
@@ -286,6 +340,25 @@ class LspClient:
         """textDocument/definition"""
         params = self._text_document_position(uri, line, character)
         return await self._request_with_retry("textDocument/definition", params)
+
+    async def declaration(self, uri, line, character):
+        """textDocument/declaration"""
+        params = self._text_document_position(uri, line, character)
+        return await self._request_with_retry("textDocument/declaration", params)
+
+    async def implementation(self, uri, line, character):
+        """textDocument/implementation"""
+        params = self._text_document_position(uri, line, character)
+        return await self._request_with_retry("textDocument/implementation", params)
+
+    async def type_definition(self, uri, line, character):
+        """textDocument/typeDefinition"""
+        params = self._text_document_position(uri, line, character)
+        return await self._request_with_retry("textDocument/typeDefinition", params)
+
+    async def workspace_symbol(self, query):
+        """workspace/symbol"""
+        return await self._request_with_retry("workspace/symbol", {"query": query})
 
     async def references(self, uri, line, character, include_declaration=True):
         """textDocument/references"""

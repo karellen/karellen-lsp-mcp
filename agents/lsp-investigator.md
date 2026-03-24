@@ -24,7 +24,11 @@ by using LSP tools for structured navigation instead of reading files line by li
 4. **Investigate** using the appropriate LSP tools:
    - `lsp_hover` to get type signatures and documentation without reading files
    - `lsp_read_definition` to jump to where a symbol is defined
+   - `lsp_read_declaration` to jump to the declaration (header/interface)
+   - `lsp_read_type_definition` to jump from a variable to its type's definition
    - `lsp_find_references` to find all usages of a symbol
+   - `lsp_find_implementations` to find all implementations of an interface/abstract method
+   - `lsp_workspace_symbols` to search for symbols by name across the project
    - `lsp_call_tree_incoming` / `lsp_call_tree_outgoing` to get full recursive call trees
    - `lsp_call_hierarchy_incoming` / `lsp_call_hierarchy_outgoing` for single-level call chains
    - `lsp_type_tree_supertypes` / `lsp_type_tree_subtypes` to get full recursive type trees

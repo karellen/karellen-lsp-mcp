@@ -33,18 +33,27 @@ Start with hover to get the type signature without reading the file:
 lsp_hover(project_id="<id>", file_path="/path/to/file.cpp", line=42, character=10)
 ```
 
-Then jump to the definition if you need more context:
+Then jump to the definition, declaration, or type definition:
 
 ```
 lsp_read_definition(project_id="<id>", file_path="/path/to/file.cpp", line=42, character=10)
+lsp_read_declaration(project_id="<id>", file_path="/path/to/file.cpp", line=42, character=10)
+lsp_read_type_definition(project_id="<id>", file_path="/path/to/file.cpp", line=42, character=10)
 ```
 
 ### 3. Trace Usage and Impact
 
-Find all references to understand where and how a symbol is used:
+Find all references or implementations:
 
 ```
 lsp_find_references(project_id="<id>", file_path="/path/to/file.cpp", line=42, character=10)
+lsp_find_implementations(project_id="<id>", file_path="/path/to/file.java", line=10, character=14)
+```
+
+Search for symbols by name across the project:
+
+```
+lsp_workspace_symbols(project_id="<id>", query="MyClassName")
 ```
 
 Trace call chains — use the recursive tree tools to get the full hierarchy in one shot:
