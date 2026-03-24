@@ -25,8 +25,10 @@ by using LSP tools for structured navigation instead of reading files line by li
    - `lsp_hover` to get type signatures and documentation without reading files
    - `lsp_read_definition` to jump to where a symbol is defined
    - `lsp_find_references` to find all usages of a symbol
-   - `lsp_call_hierarchy_incoming` / `lsp_call_hierarchy_outgoing` to trace call chains
-   - `lsp_type_hierarchy_supertypes` / `lsp_type_hierarchy_subtypes` for class hierarchies
+   - `lsp_call_tree_incoming` / `lsp_call_tree_outgoing` to get full recursive call trees
+   - `lsp_call_hierarchy_incoming` / `lsp_call_hierarchy_outgoing` for single-level call chains
+   - `lsp_type_tree_supertypes` / `lsp_type_tree_subtypes` to get full recursive type trees
+   - `lsp_type_hierarchy_supertypes` / `lsp_type_hierarchy_subtypes` for single-level type info
    - `lsp_document_symbols` to list all symbols in a file
    - `lsp_diagnostics` to get compiler errors and warnings
 5. **Report** findings with exact file paths, line numbers, and explanations
@@ -55,7 +57,7 @@ by using LSP tools for structured navigation instead of reading files line by li
 - **Hover before reading.** `lsp_hover` gives you the type signature and documentation
   for any symbol, often enough to understand usage without reading the full definition.
 - **Call hierarchy for impact analysis.** Before recommending changes to a function, use
-  `lsp_call_hierarchy_incoming` to understand all callers that might be affected.
+  `lsp_call_tree_incoming` to get the full recursive call tree in one shot.
 - **Check diagnostics for build errors.** `lsp_diagnostics` shows compiler errors and
   warnings, which is more reliable than parsing build output.
 - **Cross-file queries include indexing status.** If `indexing: true` appears in results,

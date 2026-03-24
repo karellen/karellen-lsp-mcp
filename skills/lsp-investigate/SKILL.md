@@ -47,7 +47,14 @@ Find all references to understand where and how a symbol is used:
 lsp_find_references(project_id="<id>", file_path="/path/to/file.cpp", line=42, character=10)
 ```
 
-Trace call chains to understand who calls a function and what it calls:
+Trace call chains — use the recursive tree tools to get the full hierarchy in one shot:
+
+```
+lsp_call_tree_incoming(project_id="<id>", file_path="/path/to/file.cpp", line=42, character=10)
+lsp_call_tree_outgoing(project_id="<id>", file_path="/path/to/file.cpp", line=42, character=10)
+```
+
+Or use the single-level versions if you only need immediate callers/callees:
 
 ```
 lsp_call_hierarchy_incoming(project_id="<id>", file_path="/path/to/file.cpp", line=42, character=10)
@@ -56,7 +63,14 @@ lsp_call_hierarchy_outgoing(project_id="<id>", file_path="/path/to/file.cpp", li
 
 ### 4. Understand Type Hierarchies
 
-Find base classes/interfaces and implementations:
+Get the full recursive type tree in one shot:
+
+```
+lsp_type_tree_supertypes(project_id="<id>", file_path="/path/to/file.java", line=10, character=14)
+lsp_type_tree_subtypes(project_id="<id>", file_path="/path/to/file.java", line=10, character=14)
+```
+
+Or single-level:
 
 ```
 lsp_type_hierarchy_supertypes(project_id="<id>", file_path="/path/to/file.java", line=10, character=14)
@@ -91,13 +105,13 @@ lsp_deregister_project(project_id="<id>")
 
 1. `lsp_hover` to get the signature and docs
 2. `lsp_read_definition` to see the implementation
-3. `lsp_call_hierarchy_incoming` to see who calls it
-4. `lsp_call_hierarchy_outgoing` to see what it calls
+3. `lsp_call_tree_incoming` to get the full caller tree
+4. `lsp_call_tree_outgoing` to get the full callee tree
 
 ### Assessing Change Impact
 
 1. `lsp_find_references` to find all usages of the symbol being changed
-2. `lsp_call_hierarchy_incoming` to find all callers
+2. `lsp_call_tree_incoming` to get the full caller tree
 3. For each caller, `lsp_hover` to understand how it uses the symbol
 4. `lsp_diagnostics` on affected files after making changes
 
@@ -106,13 +120,13 @@ lsp_deregister_project(project_id="<id>")
 1. Start at the file where the bug manifests
 2. `lsp_document_symbols` to find relevant functions
 3. `lsp_read_definition` to follow suspicious calls
-4. `lsp_call_hierarchy_incoming` to trace the data flow backwards
+4. `lsp_call_tree_incoming` to trace the data flow backwards
 5. `lsp_hover` on variables to check types
 
 ### Understanding a Class Hierarchy
 
-1. `lsp_type_hierarchy_supertypes` to see what a class extends/implements
-2. `lsp_type_hierarchy_subtypes` to find all implementations
+1. `lsp_type_tree_supertypes` to get the full supertype tree
+2. `lsp_type_tree_subtypes` to get the full subtype tree
 3. `lsp_document_symbols` on key classes to compare their structure
 4. `lsp_find_references` on interface methods to see polymorphic usage
 

@@ -30,6 +30,7 @@ from karellen_lsp_mcp.daemon_client import DaemonClient, DaemonClientError
 from karellen_lsp_mcp.types import (
     LocationResult, Location, HoverResult, DocumentSymbolsResult, SymbolInfo,
     CallHierarchyResult, CallHierarchyItem, TypeHierarchyResult, TypeHierarchyItem,
+    CallTreeResult, CallTreeNode, TypeTreeResult, TypeTreeNode,
     DiagnosticsResult, Diagnostic, ProjectInfo, RegisterResult, StringResult,
     IndexingStatusResult, IndexingTask, DetectedLanguageInfo, DetectResult,
 )
@@ -40,8 +41,11 @@ mcp = FastMCP("karellen-lsp-mcp", instructions=(
     "LSP-backed code intelligence server. Use lsp_register_project to register a project "
     "with its language, then use query tools (lsp_read_definition, lsp_find_references, "
     "lsp_hover, lsp_document_symbols, lsp_call_hierarchy_incoming, lsp_call_hierarchy_outgoing, "
-    "lsp_type_hierarchy_supertypes, lsp_type_hierarchy_subtypes, lsp_diagnostics) "
-    "to introspect code. All line/character positions are 0-based (LSP convention)."
+    "lsp_call_tree_incoming, lsp_call_tree_outgoing, lsp_type_hierarchy_supertypes, "
+    "lsp_type_hierarchy_subtypes, lsp_type_tree_supertypes, lsp_type_tree_subtypes, "
+    "lsp_diagnostics) to introspect code. Prefer lsp_call_tree_* and lsp_type_tree_* "
+    "over their non-recursive counterparts for full hierarchy exploration. "
+    "All line/character positions are 0-based (LSP convention)."
 ))
 
 _client = None
@@ -146,6 +150,35 @@ def _to_type_hierarchy_result(data):
              for i in data.get("items", [])]
     return TypeHierarchyResult(direction=data["direction"], items=items,
                                indexing=data.get("indexing", False))
+
+
+def _to_call_tree_node(data):
+    if data is None:
+        return None
+    children = [_to_call_tree_node(c) for c in data.get("children", [])]
+    return CallTreeNode(name=data["name"], kind=data["kind"], file=data["file"],
+                        line=data["line"], call_sites=data.get("call_sites", 1),
+                        children=children)
+
+
+def _to_call_tree_result(data):
+    root = _to_call_tree_node(data.get("root"))
+    return CallTreeResult(direction=data["direction"], root=root,
+                          indexing=data.get("indexing", False))
+
+
+def _to_type_tree_node(data):
+    if data is None:
+        return None
+    children = [_to_type_tree_node(c) for c in data.get("children", [])]
+    return TypeTreeNode(name=data["name"], kind=data["kind"], file=data["file"],
+                        line=data["line"], children=children)
+
+
+def _to_type_tree_result(data):
+    root = _to_type_tree_node(data.get("root"))
+    return TypeTreeResult(direction=data["direction"], root=root,
+                          indexing=data.get("indexing", False))
 
 
 def _to_diagnostics_result(data):
@@ -413,6 +446,110 @@ async def lsp_type_hierarchy_subtypes(project_id: str, file_path: str,
         "line": line, "character": character,
     })
     return _to_type_hierarchy_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_call_tree_incoming(project_id: str, file_path: str,
+                                 line: int, character: int,
+                                 max_depth: int = 20) -> CallTreeResult:
+    """Recursively find all callers of the function/method, returning a full tree.
+
+    Walks the incoming call hierarchy up to max_depth levels, with cycle detection.
+    Returns a tree rooted at the target function, where each node's children are
+    its callers.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 0-based line number.
+        character: 0-based character offset.
+        max_depth: Maximum recursion depth (default 20).
+    """
+    result = await _request("lsp_call_tree_incoming", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+        "max_depth": max_depth,
+    })
+    return _to_call_tree_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_call_tree_outgoing(project_id: str, file_path: str,
+                                 line: int, character: int,
+                                 max_depth: int = 20) -> CallTreeResult:
+    """Recursively find all functions called by the function, returning a full tree.
+
+    Walks the outgoing call hierarchy up to max_depth levels, with cycle detection.
+    Returns a tree rooted at the target function, where each node's children are
+    the functions it calls.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 0-based line number.
+        character: 0-based character offset.
+        max_depth: Maximum recursion depth (default 20).
+    """
+    result = await _request("lsp_call_tree_outgoing", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+        "max_depth": max_depth,
+    })
+    return _to_call_tree_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_type_tree_supertypes(project_id: str, file_path: str,
+                                   line: int, character: int,
+                                   max_depth: int = 20) -> TypeTreeResult:
+    """Recursively find all supertypes (base classes/interfaces), returning a full tree.
+
+    Walks the type hierarchy upward up to max_depth levels, with cycle detection.
+    Returns a tree rooted at the target type, where each node's children are
+    its supertypes.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 0-based line number.
+        character: 0-based character offset.
+        max_depth: Maximum recursion depth (default 20).
+    """
+    result = await _request("lsp_type_tree_supertypes", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+        "max_depth": max_depth,
+    })
+    return _to_type_tree_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_type_tree_subtypes(project_id: str, file_path: str,
+                                 line: int, character: int,
+                                 max_depth: int = 20) -> TypeTreeResult:
+    """Recursively find all subtypes (derived classes/implementations), returning a full tree.
+
+    Walks the type hierarchy downward up to max_depth levels, with cycle detection.
+    Returns a tree rooted at the target type, where each node's children are
+    its subtypes.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 0-based line number.
+        character: 0-based character offset.
+        max_depth: Maximum recursion depth (default 20).
+    """
+    result = await _request("lsp_type_tree_subtypes", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+        "max_depth": max_depth,
+    })
+    return _to_type_tree_result(result)
 
 
 @mcp.tool()

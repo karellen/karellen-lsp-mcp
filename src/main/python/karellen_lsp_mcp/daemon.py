@@ -90,6 +90,7 @@ class _FrontendSession:
 
     async def handle(self):
         """Process requests from this frontend until disconnect."""
+        cancelled = False
         try:
             while True:
                 try:
@@ -100,11 +101,19 @@ class _FrontendSession:
                 task = asyncio.create_task(self._handle_request(msg))
                 self._pending_tasks.add(task)
                 task.add_done_callback(self._pending_tasks.discard)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            # Wait for in-flight requests to complete
+            # Cancel in-flight requests
+            for t in self._pending_tasks:
+                t.cancel()
             if self._pending_tasks:
                 await asyncio.gather(*self._pending_tasks, return_exceptions=True)
-            await self._cleanup()
+            # Skip cleanup if cancelled during daemon shutdown —
+            # the daemon's shutdown sequence handles registry cleanup.
+            if not cancelled:
+                await self._cleanup()
 
     async def _handle_request(self, msg):
         """Dispatch a single request and write the response."""
@@ -218,8 +227,12 @@ class _FrontendSession:
     _LSP_METHOD_MAP = {
         "lsp_call_hierarchy_outgoing": "callHierarchy/outgoingCalls",
         "lsp_call_hierarchy_incoming": "callHierarchy/incomingCalls",
+        "lsp_call_tree_outgoing": "callHierarchy/outgoingCalls",
+        "lsp_call_tree_incoming": "callHierarchy/incomingCalls",
         "lsp_type_hierarchy_supertypes": "typeHierarchy/supertypes",
         "lsp_type_hierarchy_subtypes": "typeHierarchy/subtypes",
+        "lsp_type_tree_supertypes": "typeHierarchy/supertypes",
+        "lsp_type_tree_subtypes": "typeHierarchy/subtypes",
     }
 
     async def _handle_lsp_request(self, method, params):
@@ -273,7 +286,9 @@ class _FrontendSession:
 
         if method in ("lsp_read_definition", "lsp_find_references", "lsp_hover",
                       "lsp_call_hierarchy_incoming", "lsp_call_hierarchy_outgoing",
-                      "lsp_type_hierarchy_supertypes", "lsp_type_hierarchy_subtypes"):
+                      "lsp_type_hierarchy_supertypes", "lsp_type_hierarchy_subtypes",
+                      "lsp_call_tree_incoming", "lsp_call_tree_outgoing",
+                      "lsp_type_tree_supertypes", "lsp_type_tree_subtypes"):
             file_uri = registry.validate_file_path(project_id, params["file_path"])
             await client.ensure_file_open(file_uri)
             line = params["line"]
@@ -332,6 +347,66 @@ class _FrontendSession:
                 result = await client.subtypes(items[0])
                 return _parse_type_hierarchy(result, "subtypes",
                                              indexing=indexing)
+
+            elif method == "lsp_call_tree_incoming":
+                max_depth = params.get("max_depth", 20)
+                items = await client.prepare_call_hierarchy(
+                    file_uri, line, character)
+                if not items:
+                    return {"direction": "incoming", "root": None,
+                            "indexing": indexing}
+                root = _make_call_tree_node(items[0])
+                sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                await _walk_call_tree(client, root, items[0],
+                                      "incoming", max_depth,
+                                      set(), sem)
+                return {"direction": "incoming", "root": root,
+                        "indexing": indexing}
+
+            elif method == "lsp_call_tree_outgoing":
+                max_depth = params.get("max_depth", 20)
+                items = await client.prepare_call_hierarchy(
+                    file_uri, line, character)
+                if not items:
+                    return {"direction": "outgoing", "root": None,
+                            "indexing": indexing}
+                root = _make_call_tree_node(items[0])
+                sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                await _walk_call_tree(client, root, items[0],
+                                      "outgoing", max_depth,
+                                      set(), sem)
+                return {"direction": "outgoing", "root": root,
+                        "indexing": indexing}
+
+            elif method == "lsp_type_tree_supertypes":
+                max_depth = params.get("max_depth", 20)
+                items = await client.prepare_type_hierarchy(
+                    file_uri, line, character)
+                if not items:
+                    return {"direction": "supertypes", "root": None,
+                            "indexing": indexing}
+                root = _make_type_tree_node(items[0])
+                sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                await _walk_type_tree(client, root, items[0],
+                                      "supertypes", max_depth,
+                                      set(), sem)
+                return {"direction": "supertypes", "root": root,
+                        "indexing": indexing}
+
+            elif method == "lsp_type_tree_subtypes":
+                max_depth = params.get("max_depth", 20)
+                items = await client.prepare_type_hierarchy(
+                    file_uri, line, character)
+                if not items:
+                    return {"direction": "subtypes", "root": None,
+                            "indexing": indexing}
+                root = _make_type_tree_node(items[0])
+                sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                await _walk_type_tree(client, root, items[0],
+                                      "subtypes", max_depth,
+                                      set(), sem)
+                return {"direction": "subtypes", "root": root,
+                        "indexing": indexing}
 
         elif method == "lsp_document_symbols":
             file_uri = registry.validate_file_path(project_id, params["file_path"])
@@ -511,6 +586,138 @@ def _parse_type_hierarchy(items_raw, direction, indexing=False):
     return result_dict
 
 
+# ---------------------------------------------------------------------------
+# Recursive tree walkers for call/type hierarchy
+# ---------------------------------------------------------------------------
+
+def _make_call_tree_node(item, call_sites=1):
+    """Build a tree node dict from a raw LSP CallHierarchyItem."""
+    kind_num = item.get("kind", 0)
+    rng = item.get("selectionRange") or item.get("range", {})
+    start = rng.get("start", {})
+    return {
+        "name": item.get("name", "?"),
+        "kind": _SYMBOL_KIND_NAMES.get(kind_num, ""),
+        "file": _uri_to_path(item.get("uri", "")),
+        "line": start.get("line", 0) + 1,
+        "call_sites": call_sites,
+        "children": [],
+    }
+
+
+def _make_type_tree_node(item):
+    """Build a tree node dict from a raw LSP TypeHierarchyItem."""
+    kind_num = item.get("kind", 0)
+    rng = item.get("selectionRange") or item.get("range", {})
+    start = rng.get("start", {})
+    return {
+        "name": item.get("name", "?"),
+        "kind": _SYMBOL_KIND_NAMES.get(kind_num, ""),
+        "file": _uri_to_path(item.get("uri", "")),
+        "line": start.get("line", 0) + 1,
+        "children": [],
+    }
+
+
+def _node_key(node):
+    """Unique key for cycle detection."""
+    return (node["file"], node["line"], node["name"])
+
+
+_TREE_WALK_CONCURRENCY = 8
+
+
+async def _walk_call_tree(client, node, lsp_item, direction,
+                          depth, visited, sem):
+    """Recursively expand call hierarchy into a tree.
+
+    Passes the original LSP CallHierarchyItem (with its opaque ``data``
+    field) to each server call so the server can resolve it correctly.
+    Concurrency is bounded by *sem* to avoid overwhelming the LSP server.
+    """
+    if depth <= 0:
+        return
+    key = _node_key(node)
+    if key in visited:
+        return
+    visited.add(key)
+
+    try:
+        async with sem:
+            if direction == "incoming":
+                calls = await client.incoming_calls(lsp_item)
+            else:
+                calls = await client.outgoing_calls(lsp_item)
+    except Exception:
+        return
+
+    if not calls:
+        return
+
+    expand = []  # (child_node, child_lsp_item) pairs to recurse
+    for call in calls:
+        raw_item = (call.get("from") if direction == "incoming"
+                    else call.get("to"))
+        if raw_item is None:
+            continue
+        from_ranges = call.get("fromRanges", [])
+        call_sites = len(from_ranges) if from_ranges else 1
+        child = _make_call_tree_node(raw_item, call_sites)
+        node["children"].append(child)
+        # Eagerly mark visited to prevent duplicate parallel work
+        child_key = _node_key(child)
+        if child_key not in visited:
+            expand.append((child, raw_item))
+
+    if expand:
+        await asyncio.gather(*(
+            _walk_call_tree(client, c, ri, direction,
+                            depth - 1, visited, sem)
+            for c, ri in expand
+        ))
+
+
+async def _walk_type_tree(client, node, lsp_item, direction,
+                          depth, visited, sem):
+    """Recursively expand type hierarchy into a tree.
+
+    Same bounded-concurrency strategy as _walk_call_tree.
+    """
+    if depth <= 0:
+        return
+    key = _node_key(node)
+    if key in visited:
+        return
+    visited.add(key)
+
+    try:
+        async with sem:
+            if direction == "supertypes":
+                items = await client.supertypes(lsp_item)
+            else:
+                items = await client.subtypes(lsp_item)
+    except Exception:
+        return
+
+    if not items:
+        return
+
+    expand = []
+    for raw_item in items:
+        child = _make_type_tree_node(raw_item)
+        node["children"].append(child)
+        child_key = _node_key(child)
+        if child_key not in visited:
+            expand.append((child, raw_item))
+
+    if expand:
+        await asyncio.gather(*(
+            _walk_type_tree(client, c, ri, direction,
+                            depth - 1, visited, sem)
+            for c, ri in expand
+        ))
+
+
 _DIAG_SEVERITY = {1: "Error", 2: "Warning", 3: "Information", 4: "Hint"}
 
 
@@ -589,6 +796,7 @@ class Daemon:
         self.ready_timeout = ready_timeout
         self._runtime_dir = runtime_dir or _get_runtime_dir()
         self._frontends = {}  # session_id -> _FrontendSession
+        self._connection_tasks = {}  # session_id -> asyncio.Task
         self._next_session_id = 0
         self._server = None
         self._shutdown_event = asyncio.Event()
@@ -608,11 +816,14 @@ class Daemon:
         session = _FrontendSession(session_id, reader, writer, self)
         self._frontends[session_id] = session
         self._had_client = True
+        task = asyncio.current_task()
+        self._connection_tasks[session_id] = task
         logger.info("Frontend %d connected (%d total)", session_id, len(self._frontends))
 
         try:
             await session.handle()
         finally:
+            self._connection_tasks.pop(session_id, None)
             writer.close()
             try:
                 await writer.wait_closed()
@@ -676,12 +887,17 @@ class Daemon:
                 except asyncio.CancelledError:
                     pass
 
-            # Close all frontend connections
-            for session in list(self._frontends.values()):
+            # Cancel all connection handler tasks so they don't
+            # try to deregister during shutdown_all
+            for task in list(self._connection_tasks.values()):
+                task.cancel()
+            for task in list(self._connection_tasks.values()):
                 try:
-                    session.writer.close()
-                except Exception:
+                    await task
+                except (asyncio.CancelledError, Exception):
                     pass
+            self._frontends.clear()
+            self._connection_tasks.clear()
 
             await self.registry.shutdown_all()
 

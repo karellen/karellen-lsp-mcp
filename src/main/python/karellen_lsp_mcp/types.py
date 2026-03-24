@@ -84,6 +84,39 @@ class TypeHierarchyResult:
 
 
 @dataclass
+class CallTreeNode:
+    name: str
+    kind: str
+    file: str
+    line: int
+    call_sites: int = 1
+    children: list["CallTreeNode"] = field(default_factory=list)
+
+
+@dataclass
+class CallTreeResult:
+    direction: str
+    root: Optional["CallTreeNode"] = None
+    indexing: bool = False
+
+
+@dataclass
+class TypeTreeNode:
+    name: str
+    kind: str
+    file: str
+    line: int
+    children: list["TypeTreeNode"] = field(default_factory=list)
+
+
+@dataclass
+class TypeTreeResult:
+    direction: str
+    root: Optional["TypeTreeNode"] = None
+    indexing: bool = False
+
+
+@dataclass
 class Diagnostic:
     line: int
     character: int

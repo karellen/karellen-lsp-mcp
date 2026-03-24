@@ -117,8 +117,10 @@ All queries use the `project_id` returned by registration:
 - `lsp_find_references` — find all references
 - `lsp_hover` — type signature and documentation
 - `lsp_document_symbols` — list symbols in a file
-- `lsp_call_hierarchy_incoming` / `lsp_call_hierarchy_outgoing` — call chains
-- `lsp_type_hierarchy_supertypes` / `lsp_type_hierarchy_subtypes` — class hierarchies
+- `lsp_call_tree_incoming` / `lsp_call_tree_outgoing` — recursive call trees (preferred)
+- `lsp_call_hierarchy_incoming` / `lsp_call_hierarchy_outgoing` — single-level call chains
+- `lsp_type_tree_supertypes` / `lsp_type_tree_subtypes` — recursive type trees (preferred)
+- `lsp_type_hierarchy_supertypes` / `lsp_type_hierarchy_subtypes` — single-level type info
 - `lsp_diagnostics` — compiler errors and warnings
 
 ### 5. Deregister When Done

@@ -229,7 +229,8 @@ lsp_register_project(
 - **Hover before reading**: `lsp_hover` gives you the type signature and documentation
   for any symbol — often enough to understand usage without reading the full definition
 - **Call hierarchy for impact analysis**: before changing a function, use
-  `lsp_call_hierarchy_incoming` to understand all callers that might be affected
+  `lsp_call_tree_incoming` to get the full recursive call tree in one shot, or
+  `lsp_call_hierarchy_incoming` for a single level
 - **Single-file queries work immediately**: `lsp_read_definition`, `lsp_hover`, and
   `lsp_document_symbols` don't wait for background indexing. Use these freely even on
   large codebases that are still indexing
@@ -266,10 +267,14 @@ lsp_register_project(
 | Tool | Description |
 |------|-------------|
 | `lsp_document_symbols` | List all symbols (functions, classes, variables, etc.) in a file. |
-| `lsp_call_hierarchy_incoming` | Find all callers of function/method at position. |
-| `lsp_call_hierarchy_outgoing` | Find all functions/methods called by function at position. |
-| `lsp_type_hierarchy_supertypes` | Find base classes/interfaces of type at position. |
-| `lsp_type_hierarchy_subtypes` | Find derived classes/implementations of type at position. |
+| `lsp_call_hierarchy_incoming` | Find all callers of function/method at position (single level). |
+| `lsp_call_hierarchy_outgoing` | Find all functions/methods called by function at position (single level). |
+| `lsp_call_tree_incoming` | Recursively find all callers, returning a full tree (configurable depth, default 20). |
+| `lsp_call_tree_outgoing` | Recursively find all callees, returning a full tree (configurable depth, default 20). |
+| `lsp_type_hierarchy_supertypes` | Find base classes/interfaces of type at position (single level). |
+| `lsp_type_hierarchy_subtypes` | Find derived classes/implementations of type at position (single level). |
+| `lsp_type_tree_supertypes` | Recursively find all supertypes, returning a full tree (configurable depth, default 20). |
+| `lsp_type_tree_subtypes` | Recursively find all subtypes, returning a full tree (configurable depth, default 20). |
 
 ### Diagnostics
 | Tool | Description |
@@ -310,6 +315,27 @@ processing without parsing. Examples:
     {"name": "main", "kind": "Function", "file": "/path/to/main.cpp", "line": 5, "call_sites": 1}
   ],
   "indexing": true
+}
+```
+
+**`lsp_call_tree_incoming`** returns `CallTreeResult` (recursive):
+```json
+{
+  "direction": "incoming",
+  "root": {
+    "name": "target_func", "kind": "Function", "file": "/path/to/file.cpp", "line": 42,
+    "call_sites": 1,
+    "children": [
+      {"name": "caller_a", "kind": "Function", "file": "/path/to/a.cpp", "line": 10,
+       "call_sites": 2, "children": [
+        {"name": "main", "kind": "Function", "file": "/path/to/main.cpp", "line": 5,
+         "call_sites": 1, "children": []}
+      ]},
+      {"name": "caller_b", "kind": "Function", "file": "/path/to/b.cpp", "line": 20,
+       "call_sites": 1, "children": []}
+    ]
+  },
+  "indexing": false
 }
 ```
 

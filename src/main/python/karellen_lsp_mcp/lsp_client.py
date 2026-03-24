@@ -110,6 +110,9 @@ class LspClient:
             root_uri=root_uri,
             root_path=root_path,
             capabilities=types.ClientCapabilities(
+                window=types.WindowClientCapabilities(
+                    work_done_progress=True,
+                ),
                 text_document=types.TextDocumentClientCapabilities(
                     definition=types.DefinitionClientCapabilities(
                         dynamic_registration=False,

@@ -64,8 +64,8 @@ class LspAdapter:
     """
 
     # Subclasses set this to a list of language identifiers they handle.
-    # One adapter can register for multiple languages (e.g., jdtls handles
-    # java, kotlin, scala, groovy).
+    # The first entry is the canonical language used for project ID
+    # computation, so all aliases share one LSP server instance.
     languages = ()
 
     def check_server(self):
@@ -130,11 +130,22 @@ class ClangdAdapter(LspAdapter):
         bi = build_info or {}
         details = detection_details or {}
 
+        is_clangd = cmd[0].endswith("clangd")
+
         compile_commands_dir = self._resolve_compile_commands_dir(
             project_path, bi, details)
 
-        if cmd[0].endswith("clangd") and compile_commands_dir:
-            cmd.append("--compile-commands-dir=%s" % compile_commands_dir)
+        if is_clangd:
+            # Only add --compile-commands-dir if not already specified
+            has_cc_dir = any(
+                a.startswith("--compile-commands-dir") for a in cmd)
+            if compile_commands_dir and not has_cc_dir:
+                cmd.append("--compile-commands-dir=%s"
+                           % compile_commands_dir)
+
+            # Enable background indexing for cross-file queries
+            if "--background-index" not in cmd:
+                cmd.append("--background-index")
 
         return LspAdapterConfig(
             command=cmd,
@@ -192,11 +203,11 @@ class ClangdAdapter(LspAdapter):
 
     def _generate_cmake_compile_commands(self, project_path, details,
                                          managed_dir):
-        """Re-run cmake with -DCMAKE_EXPORT_COMPILE_COMMANDS=ON in the
-        existing build dir, then copy the result to managed_dir.
+        """Generate compile_commands.json for a CMake project.
 
-        If no existing build dir, creates an out-of-tree build under
-        the managed dir itself (not in the project tree).
+        First checks if any existing build dir already has compile_commands.json
+        and copies it to the managed dir. Otherwise, creates an out-of-tree
+        build under the managed dir — never modifies the project tree.
         """
         import subprocess
 
@@ -208,23 +219,14 @@ class ClangdAdapter(LspAdapter):
             if os.path.exists(cc_path):
                 return self._copy_to_managed(build_dir, managed_dir)
 
-        # Re-configure existing build dir to enable export
-        if cmake_build_dirs:
-            build_dir = cmake_build_dirs[0]
-            cmake_args = [
-                "cmake",
-                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-                build_dir,
-            ]
-        else:
-            # No existing build — create out-of-tree under managed dir
-            build_dir = os.path.join(managed_dir, "cmake-build")
-            cmake_args = [
-                "cmake",
-                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-                "-S", project_path,
-                "-B", build_dir,
-            ]
+        # Create out-of-tree build under managed dir
+        build_dir = os.path.join(managed_dir, "cmake-build")
+        cmake_args = [
+            "cmake",
+            "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+            "-S", project_path,
+            "-B", build_dir,
+        ]
 
         try:
             logger.info("Generating compile_commands.json: %s",
@@ -244,12 +246,9 @@ class ClangdAdapter(LspAdapter):
 
             cc_path = os.path.join(build_dir, "compile_commands.json")
             if os.path.exists(cc_path):
-                if build_dir.startswith(managed_dir):
-                    # Already under managed dir
-                    logger.info("Generated compile_commands.json at %s",
-                                build_dir)
-                    return build_dir
-                return self._copy_to_managed(build_dir, managed_dir)
+                logger.info("Generated compile_commands.json at %s",
+                            build_dir)
+                return build_dir
         except FileNotFoundError:
             logger.debug("cmake not found on PATH")
         except subprocess.TimeoutExpired:
@@ -394,6 +393,19 @@ def register_adapter(adapter):
 def get_adapter(language):
     """Get the adapter for a language, or None if not registered."""
     return _ADAPTERS.get(language)
+
+
+def canonicalize_language(language):
+    """Return the canonical language for project ID computation.
+
+    All aliases sharing an adapter map to the adapter's first declared
+    language, so e.g. "c" and "cpp" share one LSP server instance.
+    Returns the language unchanged if no adapter is registered.
+    """
+    adapter = _ADAPTERS.get(language)
+    if adapter is not None and adapter.languages:
+        return adapter.languages[0]
+    return language
 
 
 def get_supported_languages():

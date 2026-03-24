@@ -21,7 +21,7 @@ import logging
 import os
 import urllib.parse
 
-from karellen_lsp_mcp.lsp_adapter import get_adapter
+from karellen_lsp_mcp.lsp_adapter import get_adapter, canonicalize_language
 from karellen_lsp_mcp.lsp_client import LspClient
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class ProjectRegistry:
         if not os.path.isdir(real_path):
             raise ProjectRegistryError("Project path does not exist: %s" % real_path)
 
-        language = language.lower()
+        language = canonicalize_language(language.lower())
         project_id = _compute_project_id(real_path, language)
 
         async with self._lock:

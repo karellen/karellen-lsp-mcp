@@ -85,12 +85,13 @@ class ClangdAdapterTest(unittest.TestCase):
 
     def test_default_command(self):
         config = self.adapter.configure("/project", "c")
-        self.assertEqual(config.command, ["clangd"])
+        self.assertEqual(config.command, ["clangd", "--background-index"])
 
     def test_custom_command(self):
         config = self.adapter.configure("/project", "c",
                                         lsp_command=["my-clangd", "--flag"])
-        self.assertEqual(config.command, ["my-clangd", "--flag"])
+        self.assertEqual(config.command,
+                         ["my-clangd", "--flag", "--background-index"])
 
     def test_compile_commands_dir_copied_to_managed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -125,8 +126,10 @@ class ClangdAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = self.adapter.configure(tmpdir, "c",
                                             build_info={"build_dir": tmpdir})
-            for arg in config.command:
-                self.assertNotIn("--compile-commands-dir", arg)
+            cc_args = [a for a in config.command
+                       if a.startswith("--compile-commands-dir")]
+            self.assertEqual(cc_args, [])
+            self.assertIn("--background-index", config.command)
 
     def test_root_uri_is_project_path(self):
         config = self.adapter.configure("/my/project", "cpp")

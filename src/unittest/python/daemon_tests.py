@@ -26,6 +26,8 @@ from karellen_lsp_mcp.daemon import (
     _parse_locations, _parse_hover, _parse_document_symbols,
     _parse_call_hierarchy, _parse_type_hierarchy, _parse_diagnostics,
     _uri_to_path, _read_message, _write_message, _env_int,
+    _walk_call_tree, _walk_type_tree, _make_call_tree_node,
+    _make_type_tree_node,
 )
 
 
@@ -481,6 +483,277 @@ class EnvIntTest(unittest.TestCase):
             self.assertEqual(result, 42)
         finally:
             del os.environ["LSP_MCP_TEST_VAR_UNIT2"]
+
+
+def _test_sem():
+    return asyncio.Semaphore(8)
+
+
+def _lsp_item(name, kind, uri, line):
+    """Helper to create a mock LSP CallHierarchyItem/TypeHierarchyItem."""
+    return {
+        "name": name, "kind": kind, "uri": uri,
+        "selectionRange": {"start": {"line": line, "character": 0},
+                           "end": {"line": line, "character": len(name)}},
+        "range": {"start": {"line": line, "character": 0},
+                  "end": {"line": line + 5, "character": 1}},
+    }
+
+
+class WalkCallTreeTest(unittest.TestCase):
+    """Tests for recursive call hierarchy tree walking."""
+
+    def _run(self, coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_single_level(self):
+        """Root with two callers, no deeper levels."""
+        client = MagicMock()
+        caller_a = _lsp_item("caller_a", 12, "file:///a.c", 10)
+        caller_b = _lsp_item("caller_b", 12, "file:///b.c", 20)
+        client.incoming_calls = AsyncMock(side_effect=[
+            [{"from": caller_a, "fromRanges": [{"start": {"line": 15}}]},
+             {"from": caller_b, "fromRanges": [{"start": {"line": 25}},
+                                               {"start": {"line": 30}}]}],
+            [],  # caller_a has no callers
+            [],  # caller_b has no callers
+        ])
+
+        root_item = _lsp_item("target", 12, "file:///t.c", 5)
+        root = _make_call_tree_node(root_item)
+
+        self._run(_walk_call_tree(
+            client, root, root_item, "incoming", 5, set(), _test_sem()))
+
+        self.assertEqual(len(root["children"]), 2)
+        self.assertEqual(root["children"][0]["name"], "caller_a")
+        self.assertEqual(root["children"][0]["call_sites"], 1)
+        self.assertEqual(root["children"][1]["name"], "caller_b")
+        self.assertEqual(root["children"][1]["call_sites"], 2)
+
+    def test_multi_level(self):
+        """Root -> caller_a -> main (3 levels)."""
+        client = MagicMock()
+        caller_a = _lsp_item("caller_a", 12, "file:///a.c", 10)
+        main_item = _lsp_item("main", 12, "file:///main.c", 0)
+        client.incoming_calls = AsyncMock(side_effect=[
+            [{"from": caller_a, "fromRanges": [{"start": {"line": 15}}]}],
+            [{"from": main_item, "fromRanges": [{"start": {"line": 5}}]}],
+            [],  # main has no callers
+        ])
+
+        root_item = _lsp_item("target", 12, "file:///t.c", 5)
+        root = _make_call_tree_node(root_item)
+
+        self._run(_walk_call_tree(
+            client, root, root_item, "incoming", 10, set(), _test_sem()))
+
+        self.assertEqual(len(root["children"]), 1)
+        self.assertEqual(root["children"][0]["name"], "caller_a")
+        self.assertEqual(len(root["children"][0]["children"]), 1)
+        self.assertEqual(
+            root["children"][0]["children"][0]["name"], "main")
+
+    def test_cycle_detection(self):
+        """Recursive call: A -> B -> A must not loop."""
+        client = MagicMock()
+        item_a = _lsp_item("func_a", 12, "file:///a.c", 10)
+        item_b = _lsp_item("func_b", 12, "file:///b.c", 20)
+        # func_a calls func_b, func_b calls func_a (cycle)
+        client.outgoing_calls = AsyncMock(side_effect=[
+            [{"to": item_b, "fromRanges": [{"start": {"line": 15}}]}],
+            [{"to": item_a, "fromRanges": [{"start": {"line": 25}}]}],
+        ])
+
+        root_item = _lsp_item("func_a", 12, "file:///a.c", 10)
+        root = _make_call_tree_node(root_item)
+
+        self._run(_walk_call_tree(
+            client, root, root_item, "outgoing", 10, set(), _test_sem()))
+
+        self.assertEqual(len(root["children"]), 1)
+        self.assertEqual(root["children"][0]["name"], "func_b")
+        # func_b has func_a as child in tree, but NOT expanded
+        self.assertEqual(len(root["children"][0]["children"]), 1)
+        b_child = root["children"][0]["children"][0]
+        self.assertEqual(b_child["name"], "func_a")
+        self.assertEqual(b_child["children"], [])
+
+    def test_depth_limit(self):
+        """Depth 0 should not expand."""
+        client = MagicMock()
+        client.incoming_calls = AsyncMock()
+
+        root_item = _lsp_item("target", 12, "file:///t.c", 5)
+        root = _make_call_tree_node(root_item)
+
+        self._run(_walk_call_tree(
+            client, root, root_item, "incoming", 0, set(), _test_sem()))
+
+        client.incoming_calls.assert_not_called()
+        self.assertEqual(root["children"], [])
+
+    def test_depth_1_does_not_recurse(self):
+        """Depth 1 fetches children but does not expand them."""
+        client = MagicMock()
+        caller = _lsp_item("caller", 12, "file:///c.c", 10)
+        client.incoming_calls = AsyncMock(return_value=[
+            {"from": caller, "fromRanges": [{"start": {"line": 5}}]},
+        ])
+
+        root_item = _lsp_item("target", 12, "file:///t.c", 5)
+        root = _make_call_tree_node(root_item)
+
+        self._run(_walk_call_tree(
+            client, root, root_item, "incoming", 1, set(), _test_sem()))
+
+        self.assertEqual(len(root["children"]), 1)
+        self.assertEqual(root["children"][0]["name"], "caller")
+        # Only 1 call: the root's incoming_calls
+        client.incoming_calls.assert_called_once()
+
+    def test_lsp_error_handled(self):
+        """LSP errors should not crash the walker."""
+        client = MagicMock()
+        client.incoming_calls = AsyncMock(
+            side_effect=Exception("server error"))
+
+        root_item = _lsp_item("target", 12, "file:///t.c", 5)
+        root = _make_call_tree_node(root_item)
+
+        self._run(_walk_call_tree(
+            client, root, root_item, "incoming", 5, set(), _test_sem()))
+
+        self.assertEqual(root["children"], [])
+
+    def test_outgoing_direction(self):
+        """Outgoing call tree uses 'to' field."""
+        client = MagicMock()
+        callee = _lsp_item("callee", 12, "file:///c.c", 30)
+        client.outgoing_calls = AsyncMock(side_effect=[
+            [{"to": callee, "fromRanges": [{"start": {"line": 10}}]}],
+            [],
+        ])
+
+        root_item = _lsp_item("target", 12, "file:///t.c", 5)
+        root = _make_call_tree_node(root_item)
+
+        self._run(_walk_call_tree(
+            client, root, root_item, "outgoing", 5, set(), _test_sem()))
+
+        self.assertEqual(len(root["children"]), 1)
+        self.assertEqual(root["children"][0]["name"], "callee")
+
+
+class WalkTypeTreeTest(unittest.TestCase):
+    """Tests for recursive type hierarchy tree walking."""
+
+    def _run(self, coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_supertypes_multi_level(self):
+        """Child -> Parent -> GrandParent."""
+        client = MagicMock()
+        parent = _lsp_item("Parent", 5, "file:///parent.java", 10)
+        grandparent = _lsp_item("GrandParent", 5,
+                                "file:///gp.java", 5)
+        client.supertypes = AsyncMock(side_effect=[
+            [parent],
+            [grandparent],
+            [],
+        ])
+
+        root_item = _lsp_item("Child", 5, "file:///child.java", 20)
+        root = _make_type_tree_node(root_item)
+
+        self._run(_walk_type_tree(
+            client, root, root_item, "supertypes", 10, set(), _test_sem()))
+
+        self.assertEqual(len(root["children"]), 1)
+        self.assertEqual(root["children"][0]["name"], "Parent")
+        self.assertEqual(
+            len(root["children"][0]["children"]), 1)
+        self.assertEqual(
+            root["children"][0]["children"][0]["name"], "GrandParent")
+
+    def test_subtypes_diamond(self):
+        """Interface with two implementations."""
+        client = MagicMock()
+        impl_a = _lsp_item("ImplA", 5, "file:///a.java", 10)
+        impl_b = _lsp_item("ImplB", 5, "file:///b.java", 20)
+        client.subtypes = AsyncMock(side_effect=[
+            [impl_a, impl_b],
+            [],  # ImplA has no subtypes
+            [],  # ImplB has no subtypes
+        ])
+
+        root_item = _lsp_item("IFace", 11, "file:///iface.java", 5)
+        root = _make_type_tree_node(root_item)
+
+        self._run(_walk_type_tree(
+            client, root, root_item, "subtypes", 10, set(), _test_sem()))
+
+        self.assertEqual(len(root["children"]), 2)
+        self.assertEqual(root["children"][0]["name"], "ImplA")
+        self.assertEqual(root["children"][1]["name"], "ImplB")
+
+    def test_cycle_detection(self):
+        """Type cycle (shouldn't happen in practice) is handled."""
+        client = MagicMock()
+        item_a = _lsp_item("TypeA", 5, "file:///a.java", 10)
+        item_b = _lsp_item("TypeB", 5, "file:///b.java", 20)
+        client.supertypes = AsyncMock(side_effect=[
+            [item_b],
+            [item_a],
+        ])
+
+        root_item = _lsp_item("TypeA", 5, "file:///a.java", 10)
+        root = _make_type_tree_node(root_item)
+
+        self._run(_walk_type_tree(
+            client, root, root_item, "supertypes", 10, set(), _test_sem()))
+
+        self.assertEqual(len(root["children"]), 1)
+        self.assertEqual(root["children"][0]["name"], "TypeB")
+        # TypeB has TypeA as child but not expanded (cycle)
+        self.assertEqual(len(root["children"][0]["children"]), 1)
+        self.assertEqual(
+            root["children"][0]["children"][0]["children"], [])
+
+    def test_depth_limit(self):
+        """Depth 0 should not expand."""
+        client = MagicMock()
+        client.supertypes = AsyncMock()
+
+        root_item = _lsp_item("Child", 5, "file:///c.java", 20)
+        root = _make_type_tree_node(root_item)
+
+        self._run(_walk_type_tree(
+            client, root, root_item, "supertypes", 0, set(), _test_sem()))
+
+        client.supertypes.assert_not_called()
+
+    def test_lsp_error_handled(self):
+        """LSP errors should not crash the walker."""
+        client = MagicMock()
+        client.subtypes = AsyncMock(
+            side_effect=Exception("server error"))
+
+        root_item = _lsp_item("IFace", 11, "file:///i.java", 5)
+        root = _make_type_tree_node(root_item)
+
+        self._run(_walk_type_tree(
+            client, root, root_item, "subtypes", 5, set(), _test_sem()))
+
+        self.assertEqual(root["children"], [])
 
 
 if __name__ == "__main__":
