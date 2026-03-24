@@ -99,6 +99,46 @@ def _parse_xml_safe(path):
         return None
 
 
+def _resolve_jetbrains_sdk_path(sdk_name):
+    """Resolve a JetBrains SDK name (e.g. 'azul-17') to an actual JDK home path.
+
+    Searches JetBrains jdk.table.xml files (most recent IDE config first)
+    for the SDK name and returns the homePath if the directory exists.
+
+    Returns the resolved absolute path, or None if not found.
+    """
+    if not sdk_name:
+        return None
+
+    config_base = os.path.join(os.path.expanduser("~"), ".config", "JetBrains")
+    if not os.path.isdir(config_base):
+        return None
+
+    try:
+        ide_dirs = sorted(os.listdir(config_base), reverse=True)
+    except OSError:
+        return None
+
+    home = os.path.expanduser("~")
+    for ide_dir in ide_dirs:
+        table_path = os.path.join(config_base, ide_dir, "options",
+                                  "jdk.table.xml")
+        root = _parse_xml_safe(table_path)
+        if root is None:
+            continue
+        for jdk in root.iter("jdk"):
+            name_elem = jdk.find("name")
+            home_elem = jdk.find("homePath")
+            if (name_elem is not None and home_elem is not None
+                    and name_elem.get("value") == sdk_name):
+                jdk_path = home_elem.get("value", "")
+                jdk_path = jdk_path.replace("$USER_HOME$", home)
+                if os.path.isdir(jdk_path):
+                    return jdk_path
+
+    return None
+
+
 def _read_jetbrains_metadata(project_path):
     """Read JetBrains .idea/ metadata. Returns list of IdeMetadata (one per source file)."""
     idea_dir = os.path.join(project_path, ".idea")
@@ -114,7 +154,12 @@ def _read_jetbrains_metadata(project_path):
         meta = IdeMetadata(ide="jetbrains", tier=TIER_IDE_PROJECT)
         for comp in root.iter("component"):
             if comp.get("name") == "ProjectRootManager":
-                meta.java_sdk = comp.get("project-jdk-name")
+                sdk_name = comp.get("project-jdk-name")
+                meta.java_sdk = sdk_name
+                # Resolve SDK name to actual JDK path
+                resolved = _resolve_jetbrains_sdk_path(sdk_name)
+                if resolved:
+                    meta.raw["java_sdk_path"] = resolved
                 meta.java_language_level = comp.get("languageLevel")
                 meta.raw["source"] = "misc.xml"
                 break
@@ -542,6 +587,10 @@ def _merge_details_by_credibility(ide_metadata):
             details["java_sdk"] = meta.java_sdk
             details["java_sdk_source"] = source
             details["java_sdk_tier"] = meta.tier
+            # Resolved JDK home path (if available)
+            sdk_path = meta.raw.get("java_sdk_path")
+            if sdk_path:
+                details["java_sdk_path"] = sdk_path
 
         if meta.java_language_level and "java_language_level" not in details:
             details["java_language_level"] = meta.java_language_level

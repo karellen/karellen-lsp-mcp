@@ -57,6 +57,7 @@ class LspClient:
         self._notification_callbacks = {}  # method -> list of callbacks
         self._normalizer = None
         self._initialized_event = asyncio.Event()
+        self._settings = {}  # flat settings from init_options (e.g. "java.home" -> path)
         self._ready_event = asyncio.Event()
         self._indexing_done_task = None
         self._request_timeout = request_timeout
@@ -86,6 +87,10 @@ class LspClient:
         """Spawn LSP server and perform initialize/initialized handshake."""
         self._root_uri = root_uri
         root_path = urllib.parse.unquote(root_uri).removeprefix("file://")
+
+        # Store settings for workspace/configuration responses
+        if init_options and isinstance(init_options.get("settings"), dict):
+            self._settings = init_options["settings"]
 
         self._normalizer = create_normalizer(command, warmup_timeout=self._ready_timeout)
         self._normalizer.set_ready_callback(self._on_normalizer_ready)
@@ -521,9 +526,32 @@ class LspClient:
         """Respond to server-initiated requests with sensible defaults."""
         result = None
         if method == "workspace/configuration":
-            # Return empty config for each requested item
+            # Return settings matching each requested section
             items = (params or {}).get("items", [])
-            result = [None] * len(items)
+            result = []
+            for item in items:
+                section = item.get("section", "")
+                if self._settings and section:
+                    # Build a settings dict for this section by matching
+                    # keys that start with "{section}." and stripping
+                    # the prefix, or returning the full settings if
+                    # section is empty
+                    prefix = section + "."
+                    section_settings = {}
+                    for k, v in self._settings.items():
+                        if k.startswith(prefix):
+                            # Nest dotted keys: "import.gradle.java.home" -> {"import": {"gradle": {"java": {"home": v}}}}
+                            parts = k[len(prefix):].split(".")
+                            d = section_settings
+                            for p in parts[:-1]:
+                                d = d.setdefault(p, {})
+                            d[parts[-1]] = v
+                        elif k == section:
+                            section_settings = v
+                            break
+                    result.append(section_settings if section_settings else None)
+                else:
+                    result.append(self._settings if self._settings else None)
         elif method == "client/registerCapability":
             result = None
         elif method == "window/workDoneProgress/create":

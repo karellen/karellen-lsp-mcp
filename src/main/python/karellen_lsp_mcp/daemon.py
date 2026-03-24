@@ -145,15 +145,24 @@ class _FrontendSession:
             init_options = params.get("init_options")
             detection_details = None
 
-            if language is None:
-                from karellen_lsp_mcp.detector import detect_project
-                result = detect_project(params["project_path"])
-                if not result.languages:
-                    raise ProjectRegistryError(
-                        "Could not detect language for project: %s"
-                        % params["project_path"])
-                detected = result.languages[0]
-                language = detected.language
+            # Always run detection to discover project configuration
+            # (JDK paths, source roots, build info). When language is
+            # explicitly provided, use it as a filter; when omitted,
+            # take the first detected language.
+            from karellen_lsp_mcp.detector import detect_project
+            result = detect_project(params["project_path"])
+            if result.languages:
+                # Find matching language or take first
+                detected = None
+                if language is not None:
+                    for dl in result.languages:
+                        if dl.language == language:
+                            detected = dl
+                            break
+                if detected is None:
+                    detected = result.languages[0]
+                if language is None:
+                    language = detected.language
                 if lsp_command is None and detected.lsp_command:
                     lsp_command = detected.lsp_command
                 if build_info is None and detected.build_info:
@@ -161,6 +170,11 @@ class _FrontendSession:
                 if init_options is None and detected.init_options:
                     init_options = detected.init_options
                 detection_details = detected.details
+
+            if language is None:
+                raise ProjectRegistryError(
+                    "Could not detect language for project: %s"
+                    % params["project_path"])
 
             project_id = await registry.register(
                 project_path=params["project_path"],

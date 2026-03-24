@@ -355,11 +355,18 @@ class JdtlsAdapter(LspAdapter):
     def _build_init_options(self, details):
         settings = {}
 
-        # Java home from detected SDK
-        java_sdk = details.get("java_sdk")
-        if java_sdk and os.path.isdir(java_sdk):
-            # java_sdk is an absolute path (e.g., from VS Code settings)
-            settings["java.home"] = java_sdk
+        # Java home — resolved path from JetBrains SDK, VS Code, or explicit
+        java_sdk_path = details.get("java_sdk_path")
+        if not java_sdk_path:
+            # VS Code stores java_sdk as an absolute path directly
+            java_sdk = details.get("java_sdk")
+            if java_sdk and os.path.isdir(java_sdk):
+                java_sdk_path = java_sdk
+
+        if java_sdk_path:
+            settings["java.home"] = java_sdk_path
+            # Also set Gradle JDK so Gradle uses the project JDK, not system
+            settings["java.import.gradle.java.home"] = java_sdk_path
 
         # Gradle wrapper
         gradle_modules_source = details.get("gradle_modules_source")
