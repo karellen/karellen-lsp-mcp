@@ -23,7 +23,10 @@ from unittest.mock import AsyncMock, patch
 
 from karellen_lsp_mcp.project_registry import (
     ProjectRegistry, ProjectRegistryError,
-    _compute_project_id, _build_lsp_command,
+    _compute_project_id,
+)
+from karellen_lsp_mcp.lsp_adapter import (
+    ClangdAdapter, JdtlsAdapter, get_adapter, get_supported_languages,
 )
 
 
@@ -48,41 +51,130 @@ class ComputeProjectIdTest(unittest.TestCase):
         self.assertEqual(len(project_id), 16)
 
 
-class BuildLspCommandTest(unittest.TestCase):
-    def test_default_c_command(self):
-        cmd = _build_lsp_command("c", None, None)
-        self.assertEqual(cmd, ["clangd"])
+class AdapterRegistryTest(unittest.TestCase):
+    def test_clangd_registered_for_c_and_cpp(self):
+        self.assertIsInstance(get_adapter("c"), ClangdAdapter)
+        self.assertIsInstance(get_adapter("cpp"), ClangdAdapter)
 
-    def test_default_cpp_command(self):
-        cmd = _build_lsp_command("cpp", None, None)
-        self.assertEqual(cmd, ["clangd"])
+    def test_jdtls_registered_for_java_kotlin(self):
+        for lang in ("java", "kotlin"):
+            self.assertIsInstance(get_adapter(lang), JdtlsAdapter)
+
+    def test_unknown_language_returns_none(self):
+        self.assertIsNone(get_adapter("brainfuck"))
+
+    def test_supported_languages(self):
+        langs = get_supported_languages()
+        for expected in ("c", "cpp", "java", "kotlin"):
+            self.assertIn(expected, langs)
+
+
+class ClangdAdapterTest(unittest.TestCase):
+    def setUp(self):
+        self.adapter = ClangdAdapter()
+
+    def test_default_command(self):
+        config = self.adapter.configure("/project", "c")
+        self.assertEqual(config.command, ["clangd"])
 
     def test_custom_command(self):
-        cmd = _build_lsp_command("c", ["my-clangd", "--flag"], None)
-        self.assertEqual(cmd, ["my-clangd", "--flag"])
+        config = self.adapter.configure("/project", "c",
+                                        lsp_command=["my-clangd", "--flag"])
+        self.assertEqual(config.command, ["my-clangd", "--flag"])
 
-    def test_unknown_language_no_default(self):
-        with self.assertRaises(ProjectRegistryError):
-            _build_lsp_command("rust", None, None)
-
-    def test_compile_commands_dir(self):
-        cmd = _build_lsp_command("cpp", None, {"compile_commands_dir": "/build"})
-        self.assertIn("--compile-commands-dir=/build", cmd)
+    def test_compile_commands_dir_copied_to_managed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Source compile_commands.json
+            src_dir = os.path.join(tmpdir, "build")
+            os.makedirs(src_dir)
+            with open(os.path.join(src_dir, "compile_commands.json"), "w") as f:
+                f.write("[]")
+            config = self.adapter.configure(tmpdir, "cpp",
+                                            build_info={"compile_commands_dir": src_dir})
+            # Should point to managed dir, not the original
+            cc_arg = [a for a in config.command if "--compile-commands-dir" in a]
+            self.assertEqual(len(cc_arg), 1)
+            managed_path = cc_arg[0].split("=", 1)[1]
+            self.assertIn("karellen-lsp-mcp", managed_path)
+            self.assertTrue(os.path.isfile(
+                os.path.join(managed_path, "compile_commands.json")))
 
     def test_build_dir_with_compile_commands(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            cc_path = os.path.join(tmpdir, "compile_commands.json")
-            with open(cc_path, "w") as f:
+            with open(os.path.join(tmpdir, "compile_commands.json"), "w") as f:
                 f.write("[]")
-            cmd = _build_lsp_command("c", None, {"build_dir": tmpdir})
-            self.assertIn("--compile-commands-dir=%s" % tmpdir, cmd)
+            config = self.adapter.configure(tmpdir, "c",
+                                            build_info={"build_dir": tmpdir})
+            cc_arg = [a for a in config.command if "--compile-commands-dir" in a]
+            self.assertEqual(len(cc_arg), 1)
+            managed_path = cc_arg[0].split("=", 1)[1]
+            self.assertTrue(os.path.isfile(
+                os.path.join(managed_path, "compile_commands.json")))
 
     def test_build_dir_without_compile_commands(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            cmd = _build_lsp_command("c", None, {"build_dir": tmpdir})
-            # Should not add flag if compile_commands.json doesn't exist
-            for arg in cmd:
+            config = self.adapter.configure(tmpdir, "c",
+                                            build_info={"build_dir": tmpdir})
+            for arg in config.command:
                 self.assertNotIn("--compile-commands-dir", arg)
+
+    def test_root_uri_is_project_path(self):
+        config = self.adapter.configure("/my/project", "cpp")
+        self.assertIn("/my/project", config.root_uri)
+
+    def test_detection_compile_commands_copied(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            build = os.path.join(tmpdir, "build")
+            os.makedirs(build)
+            with open(os.path.join(build, "compile_commands.json"), "w") as f:
+                f.write('[{"file": "main.c", "command": "cc main.c"}]')
+            config = self.adapter.configure(
+                tmpdir, "c",
+                detection_details={"compile_commands_dir": build})
+            cc_arg = [a for a in config.command if "--compile-commands-dir" in a]
+            self.assertEqual(len(cc_arg), 1)
+            managed_path = cc_arg[0].split("=", 1)[1]
+            # Verify the copy has the right content
+            with open(os.path.join(managed_path, "compile_commands.json")) as f:
+                self.assertIn("main.c", f.read())
+
+
+class JdtlsAdapterTest(unittest.TestCase):
+    def setUp(self):
+        self.adapter = JdtlsAdapter()
+
+    @unittest.mock.patch("karellen_lsp_mcp.lsp_adapter._shutil.which", return_value="/usr/bin/jdtls")
+    def test_default_command(self, mock_which):
+        config = self.adapter.configure("/project", "java")
+        self.assertEqual(config.command[0], "/usr/bin/jdtls")
+        self.assertIn("-data", config.command)
+
+    @unittest.mock.patch("karellen_lsp_mcp.lsp_adapter._shutil.which", return_value="/usr/bin/jdtls")
+    def test_custom_command_with_data(self, mock_which):
+        config = self.adapter.configure("/project", "java",
+                                        lsp_command=["jdtls", "-data", "/custom"])
+        self.assertIn("-data", config.command)
+        self.assertIn("/custom", config.command)
+        # Should not add a second -data
+        self.assertEqual(config.command.count("-data"), 1)
+
+    @unittest.mock.patch("karellen_lsp_mcp.lsp_adapter._shutil.which", return_value=None)
+    def test_no_jdtls_on_path_raises(self, mock_which):
+        with self.assertRaises(ValueError) as ctx:
+            self.adapter.configure("/project", "java")
+        self.assertIn("jdtls not found", str(ctx.exception))
+
+    @unittest.mock.patch("karellen_lsp_mcp.lsp_adapter._shutil.which", return_value="/usr/bin/jdtls")
+    def test_project_root_override(self, mock_which):
+        config = self.adapter.configure("/project/submodule", "java",
+                                        build_info={"project_root": "/project"})
+        self.assertIn("/project", config.root_uri)
+        self.assertNotIn("submodule", config.root_uri)
+
+    @unittest.mock.patch("karellen_lsp_mcp.lsp_adapter._shutil.which", return_value="/usr/bin/jdtls")
+    def test_works_for_kotlin(self, mock_which):
+        config = self.adapter.configure("/project", "kotlin")
+        self.assertEqual(config.command[0], "/usr/bin/jdtls")
 
 
 class ProjectRegistryRegisterTest(unittest.TestCase):

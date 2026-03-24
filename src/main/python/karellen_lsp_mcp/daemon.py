@@ -25,6 +25,9 @@ import sys
 import urllib.parse
 
 from filelock import FileLock, Timeout
+from platformdirs import user_data_dir as _user_data_dir
+from platformdirs import user_log_dir as _user_log_dir
+from platformdirs import user_runtime_dir as _user_runtime_dir
 
 from karellen_lsp_mcp.project_registry import ProjectRegistry, ProjectRegistryError
 from karellen_lsp_mcp.lsp_client import LspClientError
@@ -37,19 +40,24 @@ _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
+def _get_runtime_dir():
+    return _user_runtime_dir("karellen-lsp-mcp")
+
+
 def _get_data_dir():
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-        return os.path.join(base, "karellen-lsp-mcp")
-    return os.path.join(os.path.expanduser("~"), ".local", "share", "karellen-lsp-mcp")
+    return _user_data_dir("karellen-lsp-mcp")
+
+
+def _get_log_dir():
+    return _user_log_dir("karellen-lsp-mcp")
 
 
 def get_socket_path():
-    return os.path.join(_get_data_dir(), "daemon.sock")
+    return os.path.join(_get_runtime_dir(), "daemon.sock")
 
 
 def _get_lock_path():
-    return os.path.join(_get_data_dir(), "daemon.lock")
+    return os.path.join(_get_runtime_dir(), "daemon.lock")
 
 
 async def _read_message(reader):
@@ -125,12 +133,42 @@ class _FrontendSession:
     async def _handle_method(self, method, params):
         registry = self.daemon.registry
 
-        if method == "register_project":
+        if method == "detect_project":
+            from karellen_lsp_mcp.detector import detect_project
+            result = detect_project(params["project_path"])
+            return _serialize_detection_result(result)
+
+        elif method == "register_project":
+            language = params.get("language")
+            lsp_command = params.get("lsp_command")
+            build_info = params.get("build_info")
+            init_options = params.get("init_options")
+            detection_details = None
+
+            if language is None:
+                from karellen_lsp_mcp.detector import detect_project
+                result = detect_project(params["project_path"])
+                if not result.languages:
+                    raise ProjectRegistryError(
+                        "Could not detect language for project: %s"
+                        % params["project_path"])
+                detected = result.languages[0]
+                language = detected.language
+                if lsp_command is None and detected.lsp_command:
+                    lsp_command = detected.lsp_command
+                if build_info is None and detected.build_info:
+                    build_info = detected.build_info
+                if init_options is None and detected.init_options:
+                    init_options = detected.init_options
+                detection_details = detected.details
+
             project_id = await registry.register(
                 project_path=params["project_path"],
-                language=params["language"],
-                lsp_command=params.get("lsp_command"),
-                build_info=params.get("build_info"),
+                language=language,
+                lsp_command=lsp_command,
+                build_info=build_info,
+                init_options=init_options,
+                detection_details=detection_details,
                 force=params.get("force", False),
             )
             self.registered_projects.add(project_id)
@@ -485,6 +523,43 @@ def _parse_diagnostics(diags, indexing=False):
     return result_dict
 
 
+def _serialize_detection_result(result):
+    """Convert a DetectionResult to a JSON-serializable dict.
+
+    Checks LSP server availability for each detected language via the
+    adapter registry, so the caller knows which servers need to be installed.
+    """
+    from karellen_lsp_mcp.lsp_adapter import get_adapter
+
+    languages = []
+    for lang in result.languages:
+        entry = {
+            "language": lang.language,
+            "build_system": lang.build_system,
+            "confidence": lang.confidence,
+        }
+        if lang.lsp_command:
+            entry["lsp_command"] = lang.lsp_command
+        if lang.details:
+            entry["details"] = lang.details
+
+        # Check if the LSP server for this language is available
+        adapter = get_adapter(lang.language)
+        if adapter is not None:
+            available, hint = adapter.check_server()
+            entry["server_available"] = available
+            if hint:
+                entry["install_hint"] = hint
+        else:
+            entry["server_available"] = True
+
+        languages.append(entry)
+    return {
+        "project_path": result.project_path,
+        "languages": languages,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Daemon
 # ---------------------------------------------------------------------------
@@ -493,12 +568,12 @@ class Daemon:
     """The shared daemon process."""
 
     def __init__(self, idle_timeout=300, ready_timeout=120, request_timeout=60,
-                 data_dir=None):
+                 runtime_dir=None):
         self.registry = ProjectRegistry(request_timeout=request_timeout,
                                         ready_timeout=ready_timeout)
         self._idle_timeout = idle_timeout
         self.ready_timeout = ready_timeout
-        self._data_dir = data_dir or _get_data_dir()
+        self._runtime_dir = runtime_dir or _get_runtime_dir()
         self._frontends = {}  # session_id -> _FrontendSession
         self._next_session_id = 0
         self._server = None
@@ -543,10 +618,10 @@ class Daemon:
 
     async def run(self):
         """Start the daemon and serve until shutdown."""
-        data_dir = self._data_dir
-        os.makedirs(data_dir, exist_ok=True)
-        sock_path = os.path.join(data_dir, "daemon.sock")
-        lock_path = os.path.join(data_dir, "daemon.lock")
+        runtime_dir = self._runtime_dir
+        os.makedirs(runtime_dir, exist_ok=True)
+        sock_path = os.path.join(runtime_dir, "daemon.sock")
+        lock_path = os.path.join(runtime_dir, "daemon.lock")
 
         # Acquire exclusive lock — if another daemon holds it, exit
         self._lock = FileLock(lock_path)
@@ -618,12 +693,14 @@ def _env_int(name, default):
 
 def _get_log_path():
     """Return the path for the daemon log file."""
-    return os.path.join(_get_data_dir(), "daemon.log")
+    return os.path.join(_get_log_dir(), "daemon.log")
 
 
 def main():
-    data_dir = _get_data_dir()
-    os.makedirs(data_dir, exist_ok=True)
+    runtime_dir = _get_runtime_dir()
+    os.makedirs(runtime_dir, exist_ok=True)
+    log_dir = _get_log_dir()
+    os.makedirs(log_dir, exist_ok=True)
     log_path = _get_log_path()
     logging.basicConfig(
         level=logging.INFO,

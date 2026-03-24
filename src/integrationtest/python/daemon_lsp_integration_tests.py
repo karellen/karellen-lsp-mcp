@@ -243,7 +243,7 @@ class _DaemonTestHelper:
 
     async def start(self):
         self._daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
-        self.daemon = Daemon(idle_timeout=5, data_dir=self._daemon_dir)
+        self.daemon = Daemon(idle_timeout=5, runtime_dir=self._daemon_dir)
         self._daemon_task = asyncio.create_task(self.daemon.run())
         sock_path = os.path.join(self._daemon_dir, "daemon.sock")
         for _ in range(50):
@@ -321,46 +321,42 @@ class DaemonLspIntegrationTest(unittest.TestCase):
         logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
         cls._tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-itest-")
         cls._files = _create_project(cls._tmpdir)
+        cls._loop = asyncio.new_event_loop()
+        cls._helper = _DaemonTestHelper()
+        cls._loop.run_until_complete(cls._helper.start())
+        # Register as C++ project with background indexing
+        result = cls._loop.run_until_complete(
+            cls._helper.request("register_project", {
+                "project_path": cls._tmpdir,
+                "language": "cpp",
+                "lsp_command": ["clangd", "--background-index"],
+                "build_info": {"compile_commands_dir": cls._tmpdir},
+            })
+        )
+        cls._project_id = result["project_id"]
+        # Pre-open all source files so clangd indexes them
+        for f in cls._files.values():
+            cls._loop.run_until_complete(cls._helper.request(
+                "lsp_document_symbols", {
+                    "project_id": cls._project_id,
+                    "file_path": f,
+                }))
 
     @classmethod
     def tearDownClass(cls):
+        try:
+            cls._loop.run_until_complete(
+                cls._helper.request("deregister_project",
+                                    {"project_id": cls._project_id}))
+        except Exception:
+            pass
+        cls._loop.run_until_complete(cls._helper.stop())
+        cls._loop.close()
         shutil.rmtree(cls._tmpdir, ignore_errors=True)
         logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
 
-    def setUp(self):
-        self._loop = asyncio.new_event_loop()
-        self._helper = _DaemonTestHelper()
-        self._loop.run_until_complete(self._helper.start())
-        # Register as C++ project with background indexing
-        result = self._loop.run_until_complete(
-            self._helper.request("register_project", {
-                "project_path": self._tmpdir,
-                "language": "cpp",
-                "lsp_command": ["clangd", "--background-index"],
-                "build_info": {"compile_commands_dir": self._tmpdir},
-            })
-        )
-        self._project_id = result["project_id"]
-        # Pre-open all source files so clangd indexes them
-        for f in self._files.values():
-            self._request("lsp_document_symbols", {
-                "project_id": self._project_id,
-                "file_path": f,
-            })
-
-    def tearDown(self):
-        try:
-            self._loop.run_until_complete(
-                self._helper.request("deregister_project",
-                                     {"project_id": self._project_id})
-            )
-        except Exception:
-            pass
-        self._loop.run_until_complete(self._helper.stop())
-        self._loop.close()
-
     def _request(self, method, params):
-        return self._loop.run_until_complete(self._helper.request(method, params))
+        return self._loop.run_until_complete(self.__class__._helper.request(method, params))
 
     # --- Lifecycle ---
 
@@ -683,18 +679,61 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             })
         self.assertIn("Unknown project", str(ctx.exception))
 
-    # --- Force re-register ---
+    # test_force_register_restarts_lsp moved to DaemonForceRegisterTest
+
+
+class DaemonForceRegisterTest(unittest.TestCase):
+    """Tests that mutate daemon state (force restart) — isolated with own daemon."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_clangd()
+        cls._log_handler = logging.StreamHandler()
+        cls._log_handler.setLevel(logging.DEBUG)
+        logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
+        cls._tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-itest-force-")
+        cls._files = _create_project(cls._tmpdir)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
+
+    def setUp(self):
+        self._loop = asyncio.new_event_loop()
+        self._helper = _DaemonTestHelper()
+        self._loop.run_until_complete(self._helper.start())
+        result = self._loop.run_until_complete(
+            self._helper.request("register_project", {
+                "project_path": self._tmpdir,
+                "language": "cpp",
+                "lsp_command": ["clangd", "--background-index"],
+                "build_info": {"compile_commands_dir": self._tmpdir},
+            }))
+        self._project_id = result["project_id"]
+
+    def tearDown(self):
+        try:
+            self._loop.run_until_complete(
+                self._helper.request("deregister_project",
+                                     {"project_id": self._project_id}))
+        except Exception:
+            pass
+        self._loop.run_until_complete(self._helper.stop())
+        self._loop.close()
 
     def test_force_register_restarts_lsp(self):
-        result = self._request("register_project", {
-            "project_path": self._tmpdir,
-            "language": "cpp",
-            "build_info": {"compile_commands_dir": self._tmpdir},
-            "force": True,
-        })
+        result = self._loop.run_until_complete(
+            self._helper.request("register_project", {
+                "project_path": self._tmpdir,
+                "language": "cpp",
+                "build_info": {"compile_commands_dir": self._tmpdir},
+                "force": True,
+            }))
         self.assertEqual(result["project_id"], self._project_id)
 
-        projects = self._request("list_projects", {})
+        projects = self._loop.run_until_complete(
+            self._helper.request("list_projects", {}))
         self.assertEqual(len(projects), 1)
         self.assertIn(projects[0]["status"], ("indexing", "ready"))
 
@@ -725,7 +764,7 @@ class DaemonMultiFrontendTest(unittest.TestCase):
 
         async def run():
             daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
-            daemon = Daemon(idle_timeout=5, data_dir=daemon_dir)
+            daemon = Daemon(idle_timeout=5, runtime_dir=daemon_dir)
             daemon_task = asyncio.create_task(daemon.run())
 
             sock_path = os.path.join(daemon_dir, "daemon.sock")
@@ -802,7 +841,7 @@ class DaemonMultiFrontendTest(unittest.TestCase):
 
         async def run():
             daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
-            daemon = Daemon(idle_timeout=5, data_dir=daemon_dir)
+            daemon = Daemon(idle_timeout=5, runtime_dir=daemon_dir)
             daemon_task = asyncio.create_task(daemon.run())
 
             sock_path = os.path.join(daemon_dir, "daemon.sock")

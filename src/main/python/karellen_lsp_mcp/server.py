@@ -31,7 +31,7 @@ from karellen_lsp_mcp.types import (
     LocationResult, Location, HoverResult, DocumentSymbolsResult, SymbolInfo,
     CallHierarchyResult, CallHierarchyItem, TypeHierarchyResult, TypeHierarchyItem,
     DiagnosticsResult, Diagnostic, ProjectInfo, RegisterResult, StringResult,
-    IndexingStatusResult, IndexingTask,
+    IndexingStatusResult, IndexingTask, DetectedLanguageInfo, DetectResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -160,7 +160,33 @@ def _to_diagnostics_result(data):
 
 @mcp.tool()
 @_tag_errors
-async def lsp_register_project(project_path: str, language: str,
+async def lsp_detect_project(project_path: str) -> DetectResult:
+    """Detect languages and build systems in a project without registering.
+
+    Scans the project directory for build system markers (build.gradle, pom.xml, etc.)
+    and IDE metadata (.idea/, .classpath, .vscode/) to determine what languages and
+    build systems are present. Uses a credibility hierarchy when multiple sources
+    provide conflicting information (build config > IDE sync > IDE settings > filesystem).
+
+    Args:
+        project_path: Absolute path to the project root directory.
+    """
+    result = await _request("detect_project", {"project_path": project_path})
+    languages = [DetectedLanguageInfo(
+        language=lang["language"],
+        build_system=lang.get("build_system"),
+        confidence=lang.get("confidence", "high"),
+        lsp_command=lang.get("lsp_command"),
+        details=lang.get("details"),
+        server_available=lang.get("server_available", True),
+        install_hint=lang.get("install_hint"),
+    ) for lang in result.get("languages", [])]
+    return DetectResult(project_path=result["project_path"], languages=languages)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_register_project(project_path: str, language: str = None,
                                lsp_command: list[str] = None,
                                build_info: dict = None,
                                force: bool = False) -> RegisterResult:
@@ -170,7 +196,8 @@ async def lsp_register_project(project_path: str, language: str,
 
     Args:
         project_path: Absolute path to the project root directory.
-        language: Language identifier (e.g. "c", "cpp", "python", "rust").
+        language: Language identifier (e.g. "c", "cpp", "java", "python", "rust").
+                  If omitted, auto-detects from build system markers and IDE metadata.
         lsp_command: Custom LSP server command (e.g. ["clangd", "--background-index"]).
                      If omitted, uses the default for the language.
         build_info: Optional build configuration dict. For C/C++:

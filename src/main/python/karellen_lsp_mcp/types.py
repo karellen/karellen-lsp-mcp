@@ -130,3 +130,20 @@ class IndexingStatusResult:
 @dataclass
 class StringResult:
     result: str
+
+
+@dataclass
+class DetectedLanguageInfo:
+    language: str
+    build_system: Optional[str] = None
+    confidence: str = "high"
+    lsp_command: Optional[list[str]] = None
+    details: Optional[dict] = None
+    server_available: bool = True
+    install_hint: Optional[str] = None
+
+
+@dataclass
+class DetectResult:
+    project_path: str
+    languages: list[DetectedLanguageInfo] = field(default_factory=list)

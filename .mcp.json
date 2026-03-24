@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "karellen-lsp-mcp": {
+      "type": "stdio",
+      "command": "karellen-lsp-mcp"
+    }
+  }
+}

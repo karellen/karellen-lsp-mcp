@@ -46,6 +46,7 @@ def set_properties(project):
     project.depends_on("mcp")
     project.depends_on("lsprotocol")
     project.depends_on("filelock")
+    project.depends_on("platformdirs")
 
     project.set_property("integrationtest_inherit_environment", True)
 
