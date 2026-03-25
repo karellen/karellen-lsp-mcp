@@ -161,13 +161,15 @@ def _to_call_tree_node(data):
     children = [_to_call_tree_node(c) for c in data.get("children", [])]
     return CallTreeNode(name=data["name"], kind=data["kind"], file=data["file"],
                         line=data["line"], call_sites=data.get("call_sites", 1),
-                        children=children)
+                        children=children,
+                        has_more=data.get("has_more", False))
 
 
 def _to_call_tree_result(data):
     root = _to_call_tree_node(data.get("root"))
     return CallTreeResult(direction=data["direction"], root=root,
-                          indexing=data.get("indexing", False))
+                          indexing=data.get("indexing", False),
+                          truncated=data.get("truncated", False))
 
 
 def _to_type_tree_node(data):
@@ -175,13 +177,15 @@ def _to_type_tree_node(data):
         return None
     children = [_to_type_tree_node(c) for c in data.get("children", [])]
     return TypeTreeNode(name=data["name"], kind=data["kind"], file=data["file"],
-                        line=data["line"], children=children)
+                        line=data["line"], children=children,
+                        has_more=data.get("has_more", False))
 
 
 def _to_type_tree_result(data):
     root = _to_type_tree_node(data.get("root"))
     return TypeTreeResult(direction=data["direction"], root=root,
-                          indexing=data.get("indexing", False))
+                          indexing=data.get("indexing", False),
+                          truncated=data.get("truncated", False))
 
 
 def _to_workspace_symbols_result(data):
@@ -556,7 +560,7 @@ async def lsp_type_hierarchy_subtypes(project_id: str, file_path: str,
 @_tag_errors
 async def lsp_call_tree_incoming(project_id: str, file_path: str,
                                  line: int, character: int,
-                                 max_depth: int = 20) -> CallTreeResult:
+                                 max_depth: int = 3) -> CallTreeResult:
     """Recursively find all callers of the function/method, returning a full tree.
 
     Walks the incoming call hierarchy up to max_depth levels, with cycle detection.
@@ -568,7 +572,9 @@ async def lsp_call_tree_incoming(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 0-based line number.
         character: 0-based character offset.
-        max_depth: Maximum recursion depth (default 20).
+        max_depth: Maximum depth of returned tree (default 3). Nodes at the
+                   boundary have has_more=true if deeper levels exist.
+                   Increase to explore further.
     """
     result = await _request("lsp_call_tree_incoming", {
         "project_id": project_id, "file_path": file_path,
@@ -582,7 +588,7 @@ async def lsp_call_tree_incoming(project_id: str, file_path: str,
 @_tag_errors
 async def lsp_call_tree_outgoing(project_id: str, file_path: str,
                                  line: int, character: int,
-                                 max_depth: int = 20) -> CallTreeResult:
+                                 max_depth: int = 3) -> CallTreeResult:
     """Recursively find all functions called by the function, returning a full tree.
 
     Walks the outgoing call hierarchy up to max_depth levels, with cycle detection.
@@ -594,7 +600,9 @@ async def lsp_call_tree_outgoing(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 0-based line number.
         character: 0-based character offset.
-        max_depth: Maximum recursion depth (default 20).
+        max_depth: Maximum depth of returned tree (default 3). Nodes at the
+                   boundary have has_more=true if deeper levels exist.
+                   Increase to explore further.
     """
     result = await _request("lsp_call_tree_outgoing", {
         "project_id": project_id, "file_path": file_path,
@@ -608,7 +616,7 @@ async def lsp_call_tree_outgoing(project_id: str, file_path: str,
 @_tag_errors
 async def lsp_type_tree_supertypes(project_id: str, file_path: str,
                                    line: int, character: int,
-                                   max_depth: int = 20) -> TypeTreeResult:
+                                   max_depth: int = 3) -> TypeTreeResult:
     """Recursively find all supertypes (base classes/interfaces), returning a full tree.
 
     Walks the type hierarchy upward up to max_depth levels, with cycle detection.
@@ -620,7 +628,9 @@ async def lsp_type_tree_supertypes(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 0-based line number.
         character: 0-based character offset.
-        max_depth: Maximum recursion depth (default 20).
+        max_depth: Maximum depth of returned tree (default 3). Nodes at the
+                   boundary have has_more=true if deeper levels exist.
+                   Increase to explore further.
     """
     result = await _request("lsp_type_tree_supertypes", {
         "project_id": project_id, "file_path": file_path,
@@ -634,7 +644,7 @@ async def lsp_type_tree_supertypes(project_id: str, file_path: str,
 @_tag_errors
 async def lsp_type_tree_subtypes(project_id: str, file_path: str,
                                  line: int, character: int,
-                                 max_depth: int = 20) -> TypeTreeResult:
+                                 max_depth: int = 3) -> TypeTreeResult:
     """Recursively find all subtypes (derived classes/implementations), returning a full tree.
 
     Walks the type hierarchy downward up to max_depth levels, with cycle detection.
@@ -646,7 +656,9 @@ async def lsp_type_tree_subtypes(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 0-based line number.
         character: 0-based character offset.
-        max_depth: Maximum recursion depth (default 20).
+        max_depth: Maximum depth of returned tree (default 3). Nodes at the
+                   boundary have has_more=true if deeper levels exist.
+                   Increase to explore further.
     """
     result = await _request("lsp_type_tree_subtypes", {
         "project_id": project_id, "file_path": file_path,

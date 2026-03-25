@@ -274,12 +274,12 @@ lsp_register_project(
 | `lsp_workspace_symbols` | Search for symbols across the entire project by name or pattern. |
 | `lsp_call_hierarchy_incoming` | Find all callers of function/method at position (single level). |
 | `lsp_call_hierarchy_outgoing` | Find all functions/methods called by function at position (single level). |
-| `lsp_call_tree_incoming` | Recursively find all callers, returning a full tree (configurable depth, default 20). |
-| `lsp_call_tree_outgoing` | Recursively find all callees, returning a full tree (configurable depth, default 20). |
+| `lsp_call_tree_incoming` | Recursively find all callers, returning a tree (default depth 3, has_more on truncated nodes). |
+| `lsp_call_tree_outgoing` | Recursively find all callees, returning a tree (default depth 3, has_more on truncated nodes). |
 | `lsp_type_hierarchy_supertypes` | Find base classes/interfaces of type at position (single level). |
 | `lsp_type_hierarchy_subtypes` | Find derived classes/implementations of type at position (single level). |
-| `lsp_type_tree_supertypes` | Recursively find all supertypes, returning a full tree (configurable depth, default 20). |
-| `lsp_type_tree_subtypes` | Recursively find all subtypes, returning a full tree (configurable depth, default 20). |
+| `lsp_type_tree_supertypes` | Recursively find all supertypes, returning a tree (default depth 3, has_more on truncated nodes). |
+| `lsp_type_tree_subtypes` | Recursively find all subtypes, returning a tree (default depth 3, has_more on truncated nodes). |
 
 ### Diagnostics
 | Tool | Description |
@@ -323,7 +323,7 @@ processing without parsing. Examples:
 }
 ```
 
-**`lsp_call_tree_incoming`** returns `CallTreeResult` (recursive):
+**`lsp_call_tree_incoming`** returns `CallTreeResult` (recursive, default depth 3):
 ```json
 {
   "direction": "incoming",
@@ -332,7 +332,7 @@ processing without parsing. Examples:
     "call_sites": 1,
     "children": [
       {"name": "caller_a", "kind": "Function", "file": "/path/to/a.cpp", "line": 10,
-       "call_sites": 2, "children": [
+       "call_sites": 2, "has_more": true, "children": [
         {"name": "main", "kind": "Function", "file": "/path/to/main.cpp", "line": 5,
          "call_sites": 1, "children": []}
       ]},
@@ -343,6 +343,8 @@ processing without parsing. Examples:
   "indexing": false
 }
 ```
+
+Nodes with `has_more: true` have deeper levels available — increase `max_depth` to explore.
 
 Cross-file queries include `"indexing": true` when the LSP server is still building its
 index, signaling that results may be incomplete.

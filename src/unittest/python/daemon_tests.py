@@ -527,7 +527,7 @@ class WalkCallTreeTest(unittest.TestCase):
         root = _make_call_tree_node(root_item)
 
         self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 5, set(), _test_sem()))
+            client, root, root_item, "incoming", 5, set(), _test_sem(), [0]))
 
         self.assertEqual(len(root["children"]), 2)
         self.assertEqual(root["children"][0]["name"], "caller_a")
@@ -550,7 +550,7 @@ class WalkCallTreeTest(unittest.TestCase):
         root = _make_call_tree_node(root_item)
 
         self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 10, set(), _test_sem()))
+            client, root, root_item, "incoming", 10, set(), _test_sem(), [0]))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "caller_a")
@@ -573,7 +573,7 @@ class WalkCallTreeTest(unittest.TestCase):
         root = _make_call_tree_node(root_item)
 
         self._run(_walk_call_tree(
-            client, root, root_item, "outgoing", 10, set(), _test_sem()))
+            client, root, root_item, "outgoing", 10, set(), _test_sem(), [0]))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "func_b")
@@ -583,22 +583,8 @@ class WalkCallTreeTest(unittest.TestCase):
         self.assertEqual(b_child["name"], "func_a")
         self.assertEqual(b_child["children"], [])
 
-    def test_depth_limit(self):
-        """Depth 0 should not expand."""
-        client = MagicMock()
-        client.incoming_calls = AsyncMock()
-
-        root_item = _lsp_item("target", 12, "file:///t.c", 5)
-        root = _make_call_tree_node(root_item)
-
-        self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 0, set(), _test_sem()))
-
-        client.incoming_calls.assert_not_called()
-        self.assertEqual(root["children"], [])
-
-    def test_depth_1_does_not_recurse(self):
-        """Depth 1 fetches children but does not expand them."""
+    def test_depth_0_peeks_and_sets_has_more(self):
+        """Depth 0 peeks for children and sets has_more."""
         client = MagicMock()
         caller = _lsp_item("caller", 12, "file:///c.c", 10)
         client.incoming_calls = AsyncMock(return_value=[
@@ -609,12 +595,49 @@ class WalkCallTreeTest(unittest.TestCase):
         root = _make_call_tree_node(root_item)
 
         self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 1, set(), _test_sem()))
+            client, root, root_item, "incoming", 0, set(), _test_sem(), [0]))
+
+        # Peeked — children exist but not expanded
+        client.incoming_calls.assert_called_once()
+        self.assertEqual(root["children"], [])
+        self.assertTrue(root["has_more"])
+
+    def test_depth_0_no_has_more_when_empty(self):
+        """Depth 0 with no children does not set has_more."""
+        client = MagicMock()
+        client.incoming_calls = AsyncMock(return_value=[])
+
+        root_item = _lsp_item("target", 12, "file:///t.c", 5)
+        root = _make_call_tree_node(root_item)
+
+        self._run(_walk_call_tree(
+            client, root, root_item, "incoming", 0, set(), _test_sem(), [0]))
+
+        self.assertEqual(root["children"], [])
+        self.assertNotIn("has_more", root)
+
+    def test_depth_1_expands_children_peek_grandchildren(self):
+        """Depth 1 expands children, peeks at grandchildren."""
+        client = MagicMock()
+        caller = _lsp_item("caller", 12, "file:///c.c", 10)
+        grandcaller = _lsp_item("grand", 12, "file:///g.c", 20)
+        client.incoming_calls = AsyncMock(side_effect=[
+            [{"from": caller, "fromRanges": [{"start": {"line": 5}}]}],
+            [{"from": grandcaller,
+              "fromRanges": [{"start": {"line": 25}}]}],
+        ])
+
+        root_item = _lsp_item("target", 12, "file:///t.c", 5)
+        root = _make_call_tree_node(root_item)
+
+        self._run(_walk_call_tree(
+            client, root, root_item, "incoming", 1, set(), _test_sem(), [0]))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "caller")
-        # Only 1 call: the root's incoming_calls
-        client.incoming_calls.assert_called_once()
+        # caller peeked grandchildren -> has_more
+        self.assertTrue(root["children"][0]["has_more"])
+        self.assertEqual(root["children"][0]["children"], [])
 
     def test_lsp_error_handled(self):
         """LSP errors should not crash the walker."""
@@ -626,7 +649,7 @@ class WalkCallTreeTest(unittest.TestCase):
         root = _make_call_tree_node(root_item)
 
         self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 5, set(), _test_sem()))
+            client, root, root_item, "incoming", 5, set(), _test_sem(), [0]))
 
         self.assertEqual(root["children"], [])
 
@@ -643,7 +666,7 @@ class WalkCallTreeTest(unittest.TestCase):
         root = _make_call_tree_node(root_item)
 
         self._run(_walk_call_tree(
-            client, root, root_item, "outgoing", 5, set(), _test_sem()))
+            client, root, root_item, "outgoing", 5, set(), _test_sem(), [0]))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "callee")
@@ -675,7 +698,7 @@ class WalkTypeTreeTest(unittest.TestCase):
         root = _make_type_tree_node(root_item)
 
         self._run(_walk_type_tree(
-            client, root, root_item, "supertypes", 10, set(), _test_sem()))
+            client, root, root_item, "supertypes", 10, set(), _test_sem(), [0]))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "Parent")
@@ -699,7 +722,7 @@ class WalkTypeTreeTest(unittest.TestCase):
         root = _make_type_tree_node(root_item)
 
         self._run(_walk_type_tree(
-            client, root, root_item, "subtypes", 10, set(), _test_sem()))
+            client, root, root_item, "subtypes", 10, set(), _test_sem(), [0]))
 
         self.assertEqual(len(root["children"]), 2)
         self.assertEqual(root["children"][0]["name"], "ImplA")
@@ -719,7 +742,7 @@ class WalkTypeTreeTest(unittest.TestCase):
         root = _make_type_tree_node(root_item)
 
         self._run(_walk_type_tree(
-            client, root, root_item, "supertypes", 10, set(), _test_sem()))
+            client, root, root_item, "supertypes", 10, set(), _test_sem(), [0]))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "TypeB")
@@ -728,18 +751,21 @@ class WalkTypeTreeTest(unittest.TestCase):
         self.assertEqual(
             root["children"][0]["children"][0]["children"], [])
 
-    def test_depth_limit(self):
-        """Depth 0 should not expand."""
+    def test_depth_limit_peeks(self):
+        """Depth 0 peeks for children and sets has_more."""
         client = MagicMock()
-        client.supertypes = AsyncMock()
+        parent = _lsp_item("Parent", 5, "file:///p.java", 10)
+        client.supertypes = AsyncMock(return_value=[parent])
 
         root_item = _lsp_item("Child", 5, "file:///c.java", 20)
         root = _make_type_tree_node(root_item)
 
         self._run(_walk_type_tree(
-            client, root, root_item, "supertypes", 0, set(), _test_sem()))
+            client, root, root_item, "supertypes", 0, set(), _test_sem(), [0]))
 
-        client.supertypes.assert_not_called()
+        client.supertypes.assert_called_once()
+        self.assertEqual(root["children"], [])
+        self.assertTrue(root["has_more"])
 
     def test_lsp_error_handled(self):
         """LSP errors should not crash the walker."""
@@ -751,7 +777,7 @@ class WalkTypeTreeTest(unittest.TestCase):
         root = _make_type_tree_node(root_item)
 
         self._run(_walk_type_tree(
-            client, root, root_item, "subtypes", 5, set(), _test_sem()))
+            client, root, root_item, "subtypes", 5, set(), _test_sem(), [0]))
 
         self.assertEqual(root["children"], [])
 

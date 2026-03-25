@@ -91,6 +91,7 @@ class CallTreeNode:
     line: int
     call_sites: int = 1
     children: list["CallTreeNode"] = field(default_factory=list)
+    has_more: bool = False
 
 
 @dataclass
@@ -98,6 +99,7 @@ class CallTreeResult:
     direction: str
     root: Optional["CallTreeNode"] = None
     indexing: bool = False
+    truncated: bool = False
 
 
 @dataclass
@@ -107,6 +109,7 @@ class TypeTreeNode:
     file: str
     line: int
     children: list["TypeTreeNode"] = field(default_factory=list)
+    has_more: bool = False
 
 
 @dataclass
@@ -114,6 +117,7 @@ class TypeTreeResult:
     direction: str
     root: Optional["TypeTreeNode"] = None
     indexing: bool = False
+    truncated: bool = False
 
 
 @dataclass

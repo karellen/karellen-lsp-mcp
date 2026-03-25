@@ -371,7 +371,7 @@ class _FrontendSession:
                                              indexing=indexing)
 
             elif method == "lsp_call_tree_incoming":
-                max_depth = params.get("max_depth", 20)
+                max_depth = params.get("max_depth", 3)
                 items = await client.prepare_call_hierarchy(
                     file_uri, line, character)
                 if not items:
@@ -379,14 +379,18 @@ class _FrontendSession:
                             "indexing": indexing}
                 root = _make_call_tree_node(items[0])
                 sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                nc = [0]
                 await _walk_call_tree(client, root, items[0],
                                       "incoming", max_depth,
-                                      set(), sem)
-                return {"direction": "incoming", "root": root,
-                        "indexing": indexing}
+                                      set(), sem, nc)
+                r = {"direction": "incoming", "root": root,
+                     "indexing": indexing}
+                if nc[0] >= _TREE_MAX_NODES:
+                    r["truncated"] = True
+                return r
 
             elif method == "lsp_call_tree_outgoing":
-                max_depth = params.get("max_depth", 20)
+                max_depth = params.get("max_depth", 3)
                 items = await client.prepare_call_hierarchy(
                     file_uri, line, character)
                 if not items:
@@ -394,14 +398,18 @@ class _FrontendSession:
                             "indexing": indexing}
                 root = _make_call_tree_node(items[0])
                 sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                nc = [0]
                 await _walk_call_tree(client, root, items[0],
                                       "outgoing", max_depth,
-                                      set(), sem)
-                return {"direction": "outgoing", "root": root,
-                        "indexing": indexing}
+                                      set(), sem, nc)
+                r = {"direction": "outgoing", "root": root,
+                     "indexing": indexing}
+                if nc[0] >= _TREE_MAX_NODES:
+                    r["truncated"] = True
+                return r
 
             elif method == "lsp_type_tree_supertypes":
-                max_depth = params.get("max_depth", 20)
+                max_depth = params.get("max_depth", 3)
                 items = await client.prepare_type_hierarchy(
                     file_uri, line, character)
                 if not items:
@@ -409,14 +417,18 @@ class _FrontendSession:
                             "indexing": indexing}
                 root = _make_type_tree_node(items[0])
                 sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                nc = [0]
                 await _walk_type_tree(client, root, items[0],
                                       "supertypes", max_depth,
-                                      set(), sem)
-                return {"direction": "supertypes", "root": root,
-                        "indexing": indexing}
+                                      set(), sem, nc)
+                r = {"direction": "supertypes", "root": root,
+                     "indexing": indexing}
+                if nc[0] >= _TREE_MAX_NODES:
+                    r["truncated"] = True
+                return r
 
             elif method == "lsp_type_tree_subtypes":
-                max_depth = params.get("max_depth", 20)
+                max_depth = params.get("max_depth", 3)
                 items = await client.prepare_type_hierarchy(
                     file_uri, line, character)
                 if not items:
@@ -424,11 +436,15 @@ class _FrontendSession:
                             "indexing": indexing}
                 root = _make_type_tree_node(items[0])
                 sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                nc = [0]
                 await _walk_type_tree(client, root, items[0],
                                       "subtypes", max_depth,
-                                      set(), sem)
-                return {"direction": "subtypes", "root": root,
-                        "indexing": indexing}
+                                      set(), sem, nc)
+                r = {"direction": "subtypes", "root": root,
+                     "indexing": indexing}
+                if nc[0] >= _TREE_MAX_NODES:
+                    r["truncated"] = True
+                return r
 
         elif method == "lsp_document_symbols":
             file_uri = registry.validate_file_path(project_id, params["file_path"])
@@ -652,17 +668,26 @@ def _node_key(node):
 
 
 _TREE_WALK_CONCURRENCY = 8
+_TREE_MAX_NODES = 250
 
 
 async def _walk_call_tree(client, node, lsp_item, direction,
-                          depth, visited, sem):
+                          depth, visited, sem, node_count):
     """Recursively expand call hierarchy into a tree.
 
     Passes the original LSP CallHierarchyItem (with its opaque ``data``
     field) to each server call so the server can resolve it correctly.
     Concurrency is bounded by *sem* to avoid overwhelming the LSP server.
+
+    At depth=0, fetches children to check existence (peek-ahead) and sets
+    ``has_more=True`` on the node without expanding further.
+
+    *node_count* is a single-element list ``[n]`` tracking total nodes
+    across the recursion. When it exceeds ``_TREE_MAX_NODES``, remaining
+    nodes are marked ``has_more`` without expanding.
     """
-    if depth <= 0:
+    if node_count[0] >= _TREE_MAX_NODES:
+        node["has_more"] = True
         return
     key = _node_key(node)
     if key in visited:
@@ -681,7 +706,11 @@ async def _walk_call_tree(client, node, lsp_item, direction,
     if not calls:
         return
 
-    expand = []  # (child_node, child_lsp_item) pairs to recurse
+    if depth <= 0:
+        node["has_more"] = True
+        return
+
+    expand = []
     for call in calls:
         raw_item = (call.get("from") if direction == "incoming"
                     else call.get("to"))
@@ -691,7 +720,7 @@ async def _walk_call_tree(client, node, lsp_item, direction,
         call_sites = len(from_ranges) if from_ranges else 1
         child = _make_call_tree_node(raw_item, call_sites)
         node["children"].append(child)
-        # Eagerly mark visited to prevent duplicate parallel work
+        node_count[0] += 1
         child_key = _node_key(child)
         if child_key not in visited:
             expand.append((child, raw_item))
@@ -699,18 +728,20 @@ async def _walk_call_tree(client, node, lsp_item, direction,
     if expand:
         await asyncio.gather(*(
             _walk_call_tree(client, c, ri, direction,
-                            depth - 1, visited, sem)
+                            depth - 1, visited, sem, node_count)
             for c, ri in expand
         ))
 
 
 async def _walk_type_tree(client, node, lsp_item, direction,
-                          depth, visited, sem):
+                          depth, visited, sem, node_count):
     """Recursively expand type hierarchy into a tree.
 
-    Same bounded-concurrency strategy as _walk_call_tree.
+    Same bounded-concurrency + peek-ahead + circuit-breaker strategy
+    as _walk_call_tree.
     """
-    if depth <= 0:
+    if node_count[0] >= _TREE_MAX_NODES:
+        node["has_more"] = True
         return
     key = _node_key(node)
     if key in visited:
@@ -729,10 +760,15 @@ async def _walk_type_tree(client, node, lsp_item, direction,
     if not items:
         return
 
+    if depth <= 0:
+        node["has_more"] = True
+        return
+
     expand = []
     for raw_item in items:
         child = _make_type_tree_node(raw_item)
         node["children"].append(child)
+        node_count[0] += 1
         child_key = _node_key(child)
         if child_key not in visited:
             expand.append((child, raw_item))
@@ -740,7 +776,7 @@ async def _walk_type_tree(client, node, lsp_item, direction,
     if expand:
         await asyncio.gather(*(
             _walk_type_tree(client, c, ri, direction,
-                            depth - 1, visited, sem)
+                            depth - 1, visited, sem, node_count)
             for c, ri in expand
         ))
 
