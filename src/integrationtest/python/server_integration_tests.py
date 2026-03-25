@@ -190,18 +190,29 @@ class _ServerTestBase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if server_mod._client is not None:
+        async def _shutdown():
+            if server_mod._client is not None:
+                await server_mod._client.close()
+                server_mod._client = None
+            cls._daemon._shutdown_event.set()
             try:
-                cls._loop.run_until_complete(server_mod._client.close())
-            except Exception:
+                await asyncio.wait_for(cls._daemon_task, timeout=30)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
-            server_mod._client = None
-        cls._daemon._shutdown_event.set()
+            # Cancel any remaining tasks
+            pending = [t for t in asyncio.all_tasks()
+                       if t is not asyncio.current_task() and not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
         try:
-            cls._loop.run_until_complete(
-                asyncio.wait_for(cls._daemon_task, timeout=10))
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+            cls._loop.run_until_complete(_shutdown())
+        except Exception:
             pass
+        cls._loop.run_until_complete(cls._loop.shutdown_asyncgens())
+        cls._loop.run_until_complete(cls._loop.shutdown_default_executor())
         cls._loop.close()
         cls._sock_patch.stop()
         cls._data_patch.stop()
@@ -389,6 +400,7 @@ class ServerEndToEndTest(_ServerTestBase):
 
     def test_concurrent_get_client_returns_same_instance(self):
         """Verify the asyncio.Lock in _get_client prevents duplicate connections."""
+        old_client = server_mod._client
         server_mod._client = None
 
         async def run():
@@ -400,7 +412,13 @@ class ServerEndToEndTest(_ServerTestBase):
             self.assertIs(results[0], results[1])
             self.assertIs(results[1], results[2])
 
-        self._run(run())
+        try:
+            self._run(run())
+        finally:
+            # Close the test client and restore the original
+            if server_mod._client is not None and server_mod._client is not old_client:
+                self._run(server_mod._client.close())
+            server_mod._client = old_client
 
     # --- Path with spaces (URI encoding) ---
 

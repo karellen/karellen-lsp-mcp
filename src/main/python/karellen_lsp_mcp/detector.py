@@ -835,11 +835,11 @@ def _detect_cpp_language(project_path, max_files=50):
                 else:
                     continue
                 checked += 1
-                if checked >= max_files:
+                if (has_c and has_cpp) or checked >= max_files:
                     break
-            if checked >= max_files:
+            if (has_c and has_cpp) or checked >= max_files:
                 break
-        if checked >= max_files:
+        if (has_c and has_cpp) or checked >= max_files:
             break
 
     if has_cpp:

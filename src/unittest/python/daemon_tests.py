@@ -26,8 +26,8 @@ from karellen_lsp_mcp.daemon import (
     _parse_locations, _parse_hover, _parse_document_symbols,
     _parse_call_hierarchy, _parse_type_hierarchy, _parse_diagnostics,
     _uri_to_path, _read_message, _write_message, _env_int,
-    _walk_call_tree, _walk_type_tree, _make_call_tree_node,
-    _make_type_tree_node,
+    _walk_tree, _make_tree_node,
+    _extract_call_children, _extract_type_children,
 )
 
 
@@ -524,10 +524,12 @@ class WalkCallTreeTest(unittest.TestCase):
         ])
 
         root_item = _lsp_item("target", 12, "file:///t.c", 5)
-        root = _make_call_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 5, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "incoming", 5, set(), _test_sem(), [0],
+            client.incoming_calls,
+            lambda r: _extract_call_children(r, "incoming")))
 
         self.assertEqual(len(root["children"]), 2)
         self.assertEqual(root["children"][0]["name"], "caller_a")
@@ -547,10 +549,12 @@ class WalkCallTreeTest(unittest.TestCase):
         ])
 
         root_item = _lsp_item("target", 12, "file:///t.c", 5)
-        root = _make_call_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 10, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "incoming", 10, set(), _test_sem(), [0],
+            client.incoming_calls,
+            lambda r: _extract_call_children(r, "incoming")))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "caller_a")
@@ -570,10 +574,12 @@ class WalkCallTreeTest(unittest.TestCase):
         ])
 
         root_item = _lsp_item("func_a", 12, "file:///a.c", 10)
-        root = _make_call_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_call_tree(
-            client, root, root_item, "outgoing", 10, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "outgoing", 10, set(), _test_sem(), [0],
+            client.outgoing_calls,
+            lambda r: _extract_call_children(r, "outgoing")))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "func_b")
@@ -592,10 +598,12 @@ class WalkCallTreeTest(unittest.TestCase):
         ])
 
         root_item = _lsp_item("target", 12, "file:///t.c", 5)
-        root = _make_call_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 0, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "incoming", 0, set(), _test_sem(), [0],
+            client.incoming_calls,
+            lambda r: _extract_call_children(r, "incoming")))
 
         # Peeked — children exist but not expanded
         client.incoming_calls.assert_called_once()
@@ -608,10 +616,12 @@ class WalkCallTreeTest(unittest.TestCase):
         client.incoming_calls = AsyncMock(return_value=[])
 
         root_item = _lsp_item("target", 12, "file:///t.c", 5)
-        root = _make_call_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 0, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "incoming", 0, set(), _test_sem(), [0],
+            client.incoming_calls,
+            lambda r: _extract_call_children(r, "incoming")))
 
         self.assertEqual(root["children"], [])
         self.assertNotIn("has_more", root)
@@ -628,10 +638,12 @@ class WalkCallTreeTest(unittest.TestCase):
         ])
 
         root_item = _lsp_item("target", 12, "file:///t.c", 5)
-        root = _make_call_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 1, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "incoming", 1, set(), _test_sem(), [0],
+            client.incoming_calls,
+            lambda r: _extract_call_children(r, "incoming")))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "caller")
@@ -646,10 +658,12 @@ class WalkCallTreeTest(unittest.TestCase):
             side_effect=Exception("server error"))
 
         root_item = _lsp_item("target", 12, "file:///t.c", 5)
-        root = _make_call_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_call_tree(
-            client, root, root_item, "incoming", 5, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "incoming", 5, set(), _test_sem(), [0],
+            client.incoming_calls,
+            lambda r: _extract_call_children(r, "incoming")))
 
         self.assertEqual(root["children"], [])
 
@@ -663,10 +677,12 @@ class WalkCallTreeTest(unittest.TestCase):
         ])
 
         root_item = _lsp_item("target", 12, "file:///t.c", 5)
-        root = _make_call_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_call_tree(
-            client, root, root_item, "outgoing", 5, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "outgoing", 5, set(), _test_sem(), [0],
+            client.outgoing_calls,
+            lambda r: _extract_call_children(r, "outgoing")))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "callee")
@@ -695,10 +711,12 @@ class WalkTypeTreeTest(unittest.TestCase):
         ])
 
         root_item = _lsp_item("Child", 5, "file:///child.java", 20)
-        root = _make_type_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_type_tree(
-            client, root, root_item, "supertypes", 10, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "supertypes", 10, set(), _test_sem(), [0],
+            client.supertypes,
+            lambda r: _extract_type_children(r, "supertypes")))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "Parent")
@@ -719,10 +737,12 @@ class WalkTypeTreeTest(unittest.TestCase):
         ])
 
         root_item = _lsp_item("IFace", 11, "file:///iface.java", 5)
-        root = _make_type_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_type_tree(
-            client, root, root_item, "subtypes", 10, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "subtypes", 10, set(), _test_sem(), [0],
+            client.subtypes,
+            lambda r: _extract_type_children(r, "subtypes")))
 
         self.assertEqual(len(root["children"]), 2)
         self.assertEqual(root["children"][0]["name"], "ImplA")
@@ -739,10 +759,12 @@ class WalkTypeTreeTest(unittest.TestCase):
         ])
 
         root_item = _lsp_item("TypeA", 5, "file:///a.java", 10)
-        root = _make_type_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_type_tree(
-            client, root, root_item, "supertypes", 10, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "supertypes", 10, set(), _test_sem(), [0],
+            client.supertypes,
+            lambda r: _extract_type_children(r, "supertypes")))
 
         self.assertEqual(len(root["children"]), 1)
         self.assertEqual(root["children"][0]["name"], "TypeB")
@@ -758,10 +780,12 @@ class WalkTypeTreeTest(unittest.TestCase):
         client.supertypes = AsyncMock(return_value=[parent])
 
         root_item = _lsp_item("Child", 5, "file:///c.java", 20)
-        root = _make_type_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_type_tree(
-            client, root, root_item, "supertypes", 0, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "supertypes", 0, set(), _test_sem(), [0],
+            client.supertypes,
+            lambda r: _extract_type_children(r, "supertypes")))
 
         client.supertypes.assert_called_once()
         self.assertEqual(root["children"], [])
@@ -774,10 +798,12 @@ class WalkTypeTreeTest(unittest.TestCase):
             side_effect=Exception("server error"))
 
         root_item = _lsp_item("IFace", 11, "file:///i.java", 5)
-        root = _make_type_tree_node(root_item)
+        root = _make_tree_node(root_item)
 
-        self._run(_walk_type_tree(
-            client, root, root_item, "subtypes", 5, set(), _test_sem(), [0]))
+        self._run(_walk_tree(
+            client, root, root_item, "subtypes", 5, set(), _test_sem(), [0],
+            client.subtypes,
+            lambda r: _extract_type_children(r, "subtypes")))
 
         self.assertEqual(root["children"], [])
 
