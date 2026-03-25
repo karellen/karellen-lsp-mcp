@@ -418,6 +418,13 @@ class LspClient:
             return None
         return self._normalizer.estimated_remaining_seconds()
 
+    @property
+    def needs_position_fallback(self):
+        """Whether cross-file queries should try def/decl fallback."""
+        if self._normalizer is None:
+            return False
+        return self._normalizer.needs_position_fallback
+
     def supports_method(self, method):
         """Check if the LSP server supports the given method."""
         if self._normalizer is None:

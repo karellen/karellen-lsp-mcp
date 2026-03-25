@@ -311,8 +311,9 @@ class _FrontendSession:
                 return _parse_locations(result, indexing=False)
 
             elif method == "lsp_find_implementations":
-                result = await client.implementation(
-                    file_uri, line, character)
+                result = await _query_with_fallback(
+                    client, file_uri, line, character,
+                    client.implementation)
                 return _parse_locations(result, indexing=indexing)
 
             elif method == "lsp_read_type_definition":
@@ -322,8 +323,13 @@ class _FrontendSession:
 
             elif method == "lsp_find_references":
                 include_decl = params.get("include_declaration", True)
-                result = await client.references(
-                    file_uri, line, character, include_decl)
+
+                async def _refs_query(uri, ln, ch):
+                    return await client.references(
+                        uri, ln, ch, include_decl)
+
+                result = await _query_with_fallback(
+                    client, file_uri, line, character, _refs_query)
                 return _parse_locations(result, indexing=indexing)
 
             elif method == "lsp_hover":
@@ -331,56 +337,62 @@ class _FrontendSession:
                 return _parse_hover(result)
 
             elif method == "lsp_call_hierarchy_incoming":
-                items = await client.prepare_call_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                calls, _ = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_call_hierarchy,
+                    client.incoming_calls)
+                if calls is None:
                     return {"direction": "incoming", "items": [],
                             "indexing": indexing}
-                calls = await client.incoming_calls(items[0])
                 return _parse_call_hierarchy(calls, "incoming",
                                              indexing=indexing)
 
             elif method == "lsp_call_hierarchy_outgoing":
-                items = await client.prepare_call_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                calls, _ = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_call_hierarchy,
+                    client.outgoing_calls)
+                if calls is None:
                     return {"direction": "outgoing", "items": [],
                             "indexing": indexing}
-                calls = await client.outgoing_calls(items[0])
                 return _parse_call_hierarchy(calls, "outgoing",
                                              indexing=indexing)
 
             elif method == "lsp_type_hierarchy_supertypes":
-                items = await client.prepare_type_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                result, _ = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_type_hierarchy,
+                    client.supertypes)
+                if result is None:
                     return {"direction": "supertypes", "items": [],
                             "indexing": indexing}
-                result = await client.supertypes(items[0])
                 return _parse_type_hierarchy(result, "supertypes",
                                              indexing=indexing)
 
             elif method == "lsp_type_hierarchy_subtypes":
-                items = await client.prepare_type_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                result, _ = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_type_hierarchy,
+                    client.subtypes)
+                if result is None:
                     return {"direction": "subtypes", "items": [],
                             "indexing": indexing}
-                result = await client.subtypes(items[0])
                 return _parse_type_hierarchy(result, "subtypes",
                                              indexing=indexing)
 
             elif method == "lsp_call_tree_incoming":
                 max_depth = params.get("max_depth", 3)
-                items = await client.prepare_call_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                _, lsp_item = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_call_hierarchy,
+                    client.incoming_calls)
+                if lsp_item is None:
                     return {"direction": "incoming", "root": None,
                             "indexing": indexing}
-                root = _make_call_tree_node(items[0])
+                root = _make_call_tree_node(lsp_item)
                 sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
                 nc = [0]
-                await _walk_call_tree(client, root, items[0],
+                await _walk_call_tree(client, root, lsp_item,
                                       "incoming", max_depth,
                                       set(), sem, nc)
                 r = {"direction": "incoming", "root": root,
@@ -391,15 +403,17 @@ class _FrontendSession:
 
             elif method == "lsp_call_tree_outgoing":
                 max_depth = params.get("max_depth", 3)
-                items = await client.prepare_call_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                _, lsp_item = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_call_hierarchy,
+                    client.outgoing_calls)
+                if lsp_item is None:
                     return {"direction": "outgoing", "root": None,
                             "indexing": indexing}
-                root = _make_call_tree_node(items[0])
+                root = _make_call_tree_node(lsp_item)
                 sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
                 nc = [0]
-                await _walk_call_tree(client, root, items[0],
+                await _walk_call_tree(client, root, lsp_item,
                                       "outgoing", max_depth,
                                       set(), sem, nc)
                 r = {"direction": "outgoing", "root": root,
@@ -410,15 +424,17 @@ class _FrontendSession:
 
             elif method == "lsp_type_tree_supertypes":
                 max_depth = params.get("max_depth", 3)
-                items = await client.prepare_type_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                _, lsp_item = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_type_hierarchy,
+                    client.supertypes)
+                if lsp_item is None:
                     return {"direction": "supertypes", "root": None,
                             "indexing": indexing}
-                root = _make_type_tree_node(items[0])
+                root = _make_type_tree_node(lsp_item)
                 sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
                 nc = [0]
-                await _walk_type_tree(client, root, items[0],
+                await _walk_type_tree(client, root, lsp_item,
                                       "supertypes", max_depth,
                                       set(), sem, nc)
                 r = {"direction": "supertypes", "root": root,
@@ -429,15 +445,17 @@ class _FrontendSession:
 
             elif method == "lsp_type_tree_subtypes":
                 max_depth = params.get("max_depth", 3)
-                items = await client.prepare_type_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                _, lsp_item = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_type_hierarchy,
+                    client.subtypes)
+                if lsp_item is None:
                     return {"direction": "subtypes", "root": None,
                             "indexing": indexing}
-                root = _make_type_tree_node(items[0])
+                root = _make_type_tree_node(lsp_item)
                 sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
                 nc = [0]
-                await _walk_type_tree(client, root, items[0],
+                await _walk_type_tree(client, root, lsp_item,
                                       "subtypes", max_depth,
                                       set(), sem, nc)
                 r = {"direction": "subtypes", "root": root,
@@ -632,6 +650,115 @@ def _parse_type_hierarchy(items_raw, direction, indexing=False):
 # ---------------------------------------------------------------------------
 # Recursive tree walkers for call/type hierarchy
 # ---------------------------------------------------------------------------
+
+async def _resolve_positions(client, file_uri, line, character):
+    """Resolve a position to all candidate (uri, line, char) tuples.
+
+    Returns the original position first, then declaration and definition
+    positions as fallbacks. Deduplicates and opens files as needed.
+    Some LSP servers resolve cross-TU queries only from specific
+    positions (e.g., clangd resolves incoming callers from the header
+    declaration but not the source definition).
+    """
+    seen = set()
+    positions = []
+
+    def _add(uri, ln, ch):
+        key = (uri, ln, ch)
+        if key not in seen:
+            seen.add(key)
+            positions.append(key)
+
+    _add(file_uri, line, character)
+
+    for lookup_fn in (client.declaration, client.definition):
+        try:
+            result = await lookup_fn(file_uri, line, character)
+        except Exception:
+            continue
+        if not result:
+            continue
+        if isinstance(result, dict):
+            result = [result]
+        for loc in result:
+            uri = loc.get("targetUri") or loc.get("uri", "")
+            rng = (loc.get("targetSelectionRange")
+                   or loc.get("range", {}))
+            start = rng.get("start", {})
+            _add(uri, start.get("line", 0), start.get("character", 0))
+
+    # Ensure all files are open
+    for uri, _, _ in positions[1:]:
+        try:
+            await client.ensure_file_open(uri)
+        except Exception:
+            pass
+
+    return positions
+
+
+async def _query_with_fallback(client, file_uri, line, character,
+                               query_fn):
+    """Run a positional query with def/decl fallback.
+
+    Tries the original position first. If the result is empty and the
+    server needs position fallback, tries declaration and definition
+    positions. Returns the first non-empty result.
+    """
+    result = await query_fn(file_uri, line, character)
+    if result or not client.needs_position_fallback:
+        return result
+
+    positions = await _resolve_positions(
+        client, file_uri, line, character)
+
+    for uri, ln, ch in positions[1:]:  # skip original
+        try:
+            alt = await query_fn(uri, ln, ch)
+        except Exception:
+            continue
+        if alt:
+            return alt
+    return result
+
+
+async def _prepare_with_fallback(client, file_uri, line, character,
+                                 prepare_fn, query_fn):
+    """Prepare a hierarchy item and query it, with def/decl fallback.
+
+    Tries prepareCallHierarchy/prepareTypeHierarchy from the original
+    position. If the query returns empty and the server needs position
+    fallback, tries declaration and definition positions.
+    Returns (results, lsp_item) or (None, None).
+    """
+    items = await prepare_fn(file_uri, line, character)
+    if not items:
+        return None, None
+
+    lsp_item = items[0]
+    results = await query_fn(lsp_item)
+    if results or not client.needs_position_fallback:
+        return results, lsp_item
+
+    positions = await _resolve_positions(
+        client, file_uri, line, character)
+
+    for uri, ln, ch in positions[1:]:  # skip original
+        try:
+            alt_items = await prepare_fn(uri, ln, ch)
+        except Exception:
+            continue
+        if not alt_items:
+            continue
+        try:
+            alt_results = await query_fn(alt_items[0])
+        except Exception:
+            continue
+        if alt_results:
+            return alt_results, alt_items[0]
+
+    return results, lsp_item
+
 
 def _make_call_tree_node(item, call_sites=1):
     """Build a tree node dict from a raw LSP CallHierarchyItem."""

@@ -121,6 +121,16 @@ class LspNormalizer:
         """
         return error
 
+    @property
+    def needs_position_fallback(self):
+        """Whether cross-file queries should try def/decl fallback positions.
+
+        Some servers (e.g., clangd) resolve cross-TU references only from
+        certain positions (declaration vs definition). When True, the daemon
+        tries alternate positions if the initial query returns empty.
+        """
+        return False
+
     def supports_method(self, method):
         """Return True if the LSP server supports the given method.
 
@@ -194,6 +204,10 @@ class ClangdNormalizer(LspNormalizer):
             if m:
                 self._major_version = int(m.group(1))
                 logger.info("Detected clangd major version: %d", self._major_version)
+
+    @property
+    def needs_position_fallback(self):
+        return True
 
     def supports_method(self, method):
         min_ver = self._METHOD_MIN_VERSION.get(method)
