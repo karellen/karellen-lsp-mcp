@@ -25,6 +25,9 @@ import sys
 import urllib.parse
 
 from filelock import FileLock, Timeout
+from platformdirs import user_data_dir as _user_data_dir
+from platformdirs import user_log_dir as _user_log_dir
+from platformdirs import user_runtime_dir as _user_runtime_dir
 
 from karellen_lsp_mcp.project_registry import ProjectRegistry, ProjectRegistryError
 from karellen_lsp_mcp.lsp_client import LspClientError
@@ -37,19 +40,24 @@ _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
+def _get_runtime_dir():
+    return _user_runtime_dir("karellen-lsp-mcp")
+
+
 def _get_data_dir():
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-        return os.path.join(base, "karellen-lsp-mcp")
-    return os.path.join(os.path.expanduser("~"), ".local", "share", "karellen-lsp-mcp")
+    return _user_data_dir("karellen-lsp-mcp")
+
+
+def _get_log_dir():
+    return _user_log_dir("karellen-lsp-mcp")
 
 
 def get_socket_path():
-    return os.path.join(_get_data_dir(), "daemon.sock")
+    return os.path.join(_get_runtime_dir(), "daemon.sock")
 
 
 def _get_lock_path():
-    return os.path.join(_get_data_dir(), "daemon.lock")
+    return os.path.join(_get_runtime_dir(), "daemon.lock")
 
 
 async def _read_message(reader):
@@ -82,6 +90,7 @@ class _FrontendSession:
 
     async def handle(self):
         """Process requests from this frontend until disconnect."""
+        cancelled = False
         try:
             while True:
                 try:
@@ -92,11 +101,19 @@ class _FrontendSession:
                 task = asyncio.create_task(self._handle_request(msg))
                 self._pending_tasks.add(task)
                 task.add_done_callback(self._pending_tasks.discard)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            # Wait for in-flight requests to complete
+            # Cancel in-flight requests
+            for t in self._pending_tasks:
+                t.cancel()
             if self._pending_tasks:
                 await asyncio.gather(*self._pending_tasks, return_exceptions=True)
-            await self._cleanup()
+            # Skip cleanup if cancelled during daemon shutdown —
+            # the daemon's shutdown sequence handles registry cleanup.
+            if not cancelled:
+                await self._cleanup()
 
     async def _handle_request(self, msg):
         """Dispatch a single request and write the response."""
@@ -125,12 +142,60 @@ class _FrontendSession:
     async def _handle_method(self, method, params):
         registry = self.daemon.registry
 
-        if method == "register_project":
+        if method == "scan_languages":
+            from karellen_lsp_mcp.detector import scan_languages
+            return scan_languages(params["project_path"])
+
+        elif method == "detect_project":
+            from karellen_lsp_mcp.detector import detect_project
+            result = detect_project(params["project_path"])
+            return _serialize_detection_result(result)
+
+        elif method == "register_project":
+            language = params.get("language")
+            lsp_command = params.get("lsp_command")
+            build_info = params.get("build_info")
+            init_options = params.get("init_options")
+            detection_details = None
+
+            # Always run detection to discover project configuration
+            # (JDK paths, source roots, build info). When language is
+            # explicitly provided, use it as a filter; when omitted,
+            # take the first detected language.
+            from karellen_lsp_mcp.detector import detect_project
+            result = detect_project(params["project_path"])
+            if result.languages:
+                # Find matching language or take first
+                detected = None
+                if language is not None:
+                    for dl in result.languages:
+                        if dl.language == language:
+                            detected = dl
+                            break
+                if detected is None:
+                    detected = result.languages[0]
+                if language is None:
+                    language = detected.language
+                if lsp_command is None and detected.lsp_command:
+                    lsp_command = detected.lsp_command
+                if build_info is None and detected.build_info:
+                    build_info = detected.build_info
+                if init_options is None and detected.init_options:
+                    init_options = detected.init_options
+                detection_details = detected.details
+
+            if language is None:
+                raise ProjectRegistryError(
+                    "Could not detect language for project: %s"
+                    % params["project_path"])
+
             project_id = await registry.register(
                 project_path=params["project_path"],
-                language=params["language"],
-                lsp_command=params.get("lsp_command"),
-                build_info=params.get("build_info"),
+                language=language,
+                lsp_command=lsp_command,
+                build_info=build_info,
+                init_options=init_options,
+                detection_details=detection_details,
                 force=params.get("force", False),
             )
             self.registered_projects.add(project_id)
@@ -159,15 +224,21 @@ class _FrontendSession:
     # Single-file queries work immediately from clangd's AST built on
     # didOpen — no need to wait for background indexing.
     _SINGLE_FILE_METHODS = frozenset({
-        "lsp_read_definition", "lsp_hover", "lsp_document_symbols",
+        "lsp_read_definition", "lsp_read_declaration",
+        "lsp_read_type_definition",
+        "lsp_hover", "lsp_document_symbols",
     })
 
     # MCP tool name -> LSP method for feature support checks
     _LSP_METHOD_MAP = {
         "lsp_call_hierarchy_outgoing": "callHierarchy/outgoingCalls",
         "lsp_call_hierarchy_incoming": "callHierarchy/incomingCalls",
+        "lsp_call_tree_outgoing": "callHierarchy/outgoingCalls",
+        "lsp_call_tree_incoming": "callHierarchy/incomingCalls",
         "lsp_type_hierarchy_supertypes": "typeHierarchy/supertypes",
         "lsp_type_hierarchy_subtypes": "typeHierarchy/subtypes",
+        "lsp_type_tree_supertypes": "typeHierarchy/supertypes",
+        "lsp_type_tree_subtypes": "typeHierarchy/subtypes",
     }
 
     async def _handle_lsp_request(self, method, params):
@@ -219,22 +290,46 @@ class _FrontendSession:
 
         indexing = client.state == ServerState.INDEXING
 
-        if method in ("lsp_read_definition", "lsp_find_references", "lsp_hover",
+        if method in ("lsp_read_definition", "lsp_read_declaration",
+                      "lsp_find_implementations", "lsp_read_type_definition",
+                      "lsp_find_references", "lsp_hover",
                       "lsp_call_hierarchy_incoming", "lsp_call_hierarchy_outgoing",
-                      "lsp_type_hierarchy_supertypes", "lsp_type_hierarchy_subtypes"):
+                      "lsp_type_hierarchy_supertypes", "lsp_type_hierarchy_subtypes",
+                      "lsp_call_tree_incoming", "lsp_call_tree_outgoing",
+                      "lsp_type_tree_supertypes", "lsp_type_tree_subtypes"):
             file_uri = registry.validate_file_path(project_id, params["file_path"])
             await client.ensure_file_open(file_uri)
-            line = params["line"]
-            character = params["character"]
+            line = params["line"] - 1
+            character = params["character"] - 1
 
             if method == "lsp_read_definition":
                 result = await client.definition(file_uri, line, character)
                 return _parse_locations(result, indexing=False)
 
+            elif method == "lsp_read_declaration":
+                result = await client.declaration(file_uri, line, character)
+                return _parse_locations(result, indexing=False)
+
+            elif method == "lsp_find_implementations":
+                result = await _query_with_fallback(
+                    client, file_uri, line, character,
+                    client.implementation)
+                return _parse_locations(result, indexing=indexing)
+
+            elif method == "lsp_read_type_definition":
+                result = await client.type_definition(
+                    file_uri, line, character)
+                return _parse_locations(result, indexing=False)
+
             elif method == "lsp_find_references":
                 include_decl = params.get("include_declaration", True)
-                result = await client.references(
-                    file_uri, line, character, include_decl)
+
+                async def _refs_query(uri, ln, ch):
+                    return await client.references(
+                        uri, ln, ch, include_decl)
+
+                result = await _query_with_fallback(
+                    client, file_uri, line, character, _refs_query)
                 return _parse_locations(result, indexing=indexing)
 
             elif method == "lsp_hover":
@@ -242,44 +337,132 @@ class _FrontendSession:
                 return _parse_hover(result)
 
             elif method == "lsp_call_hierarchy_incoming":
-                items = await client.prepare_call_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                calls, _ = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_call_hierarchy,
+                    client.incoming_calls)
+                if calls is None:
                     return {"direction": "incoming", "items": [],
                             "indexing": indexing}
-                calls = await client.incoming_calls(items[0])
                 return _parse_call_hierarchy(calls, "incoming",
                                              indexing=indexing)
 
             elif method == "lsp_call_hierarchy_outgoing":
-                items = await client.prepare_call_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                calls, _ = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_call_hierarchy,
+                    client.outgoing_calls)
+                if calls is None:
                     return {"direction": "outgoing", "items": [],
                             "indexing": indexing}
-                calls = await client.outgoing_calls(items[0])
                 return _parse_call_hierarchy(calls, "outgoing",
                                              indexing=indexing)
 
             elif method == "lsp_type_hierarchy_supertypes":
-                items = await client.prepare_type_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                result, _ = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_type_hierarchy,
+                    client.supertypes)
+                if result is None:
                     return {"direction": "supertypes", "items": [],
                             "indexing": indexing}
-                result = await client.supertypes(items[0])
                 return _parse_type_hierarchy(result, "supertypes",
                                              indexing=indexing)
 
             elif method == "lsp_type_hierarchy_subtypes":
-                items = await client.prepare_type_hierarchy(
-                    file_uri, line, character)
-                if not items:
+                result, _ = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_type_hierarchy,
+                    client.subtypes)
+                if result is None:
                     return {"direction": "subtypes", "items": [],
                             "indexing": indexing}
-                result = await client.subtypes(items[0])
                 return _parse_type_hierarchy(result, "subtypes",
                                              indexing=indexing)
+
+            elif method == "lsp_call_tree_incoming":
+                max_depth = params.get("max_depth", 3)
+                _, lsp_item = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_call_hierarchy,
+                    client.incoming_calls)
+                if lsp_item is None:
+                    return {"direction": "incoming", "root": None,
+                            "indexing": indexing}
+                root = _make_call_tree_node(lsp_item)
+                sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                nc = [0]
+                await _walk_call_tree(client, root, lsp_item,
+                                      "incoming", max_depth,
+                                      set(), sem, nc)
+                r = {"direction": "incoming", "root": root,
+                     "indexing": indexing}
+                if nc[0] >= _TREE_MAX_NODES:
+                    r["truncated"] = True
+                return r
+
+            elif method == "lsp_call_tree_outgoing":
+                max_depth = params.get("max_depth", 3)
+                _, lsp_item = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_call_hierarchy,
+                    client.outgoing_calls)
+                if lsp_item is None:
+                    return {"direction": "outgoing", "root": None,
+                            "indexing": indexing}
+                root = _make_call_tree_node(lsp_item)
+                sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                nc = [0]
+                await _walk_call_tree(client, root, lsp_item,
+                                      "outgoing", max_depth,
+                                      set(), sem, nc)
+                r = {"direction": "outgoing", "root": root,
+                     "indexing": indexing}
+                if nc[0] >= _TREE_MAX_NODES:
+                    r["truncated"] = True
+                return r
+
+            elif method == "lsp_type_tree_supertypes":
+                max_depth = params.get("max_depth", 3)
+                _, lsp_item = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_type_hierarchy,
+                    client.supertypes)
+                if lsp_item is None:
+                    return {"direction": "supertypes", "root": None,
+                            "indexing": indexing}
+                root = _make_type_tree_node(lsp_item)
+                sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                nc = [0]
+                await _walk_type_tree(client, root, lsp_item,
+                                      "supertypes", max_depth,
+                                      set(), sem, nc)
+                r = {"direction": "supertypes", "root": root,
+                     "indexing": indexing}
+                if nc[0] >= _TREE_MAX_NODES:
+                    r["truncated"] = True
+                return r
+
+            elif method == "lsp_type_tree_subtypes":
+                max_depth = params.get("max_depth", 3)
+                _, lsp_item = await _prepare_with_fallback(
+                    client, file_uri, line, character,
+                    client.prepare_type_hierarchy,
+                    client.subtypes)
+                if lsp_item is None:
+                    return {"direction": "subtypes", "root": None,
+                            "indexing": indexing}
+                root = _make_type_tree_node(lsp_item)
+                sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
+                nc = [0]
+                await _walk_type_tree(client, root, lsp_item,
+                                      "subtypes", max_depth,
+                                      set(), sem, nc)
+                r = {"direction": "subtypes", "root": root,
+                     "indexing": indexing}
+                if nc[0] >= _TREE_MAX_NODES:
+                    r["truncated"] = True
+                return r
 
         elif method == "lsp_document_symbols":
             file_uri = registry.validate_file_path(project_id, params["file_path"])
@@ -292,6 +475,11 @@ class _FrontendSession:
             await client.ensure_file_open(file_uri)
             diags = client.get_diagnostics(file_uri)
             return _parse_diagnostics(diags, indexing=indexing)
+
+        elif method == "lsp_workspace_symbols":
+            query = params.get("query", "")
+            result = await client.workspace_symbol(query)
+            return _parse_workspace_symbols(result, indexing=indexing)
 
         else:
             raise ProjectRegistryError("Unknown LSP method: %s" % method)
@@ -459,6 +647,295 @@ def _parse_type_hierarchy(items_raw, direction, indexing=False):
     return result_dict
 
 
+# ---------------------------------------------------------------------------
+# Recursive tree walkers for call/type hierarchy
+# ---------------------------------------------------------------------------
+
+async def _resolve_positions(client, file_uri, line, character):
+    """Resolve a position to all candidate (uri, line, char) tuples.
+
+    Returns the original position first, then declaration and definition
+    positions as fallbacks. Deduplicates and opens files as needed.
+    Some LSP servers resolve cross-TU queries only from specific
+    positions (e.g., clangd resolves incoming callers from the header
+    declaration but not the source definition).
+    """
+    seen = set()
+    positions = []
+
+    def _add(uri, ln, ch):
+        key = (uri, ln, ch)
+        if key not in seen:
+            seen.add(key)
+            positions.append(key)
+
+    _add(file_uri, line, character)
+
+    for lookup_fn in (client.declaration, client.definition):
+        try:
+            result = await lookup_fn(file_uri, line, character)
+        except Exception:
+            continue
+        if not result:
+            continue
+        if isinstance(result, dict):
+            result = [result]
+        for loc in result:
+            uri = loc.get("targetUri") or loc.get("uri", "")
+            rng = (loc.get("targetSelectionRange")
+                   or loc.get("range", {}))
+            start = rng.get("start", {})
+            _add(uri, start.get("line", 0), start.get("character", 0))
+
+    # Ensure all files are open
+    for uri, _, _ in positions[1:]:
+        try:
+            await client.ensure_file_open(uri)
+        except Exception:
+            pass
+
+    return positions
+
+
+async def _query_with_fallback(client, file_uri, line, character,
+                               query_fn):
+    """Run a positional query with def/decl fallback.
+
+    Tries the original position first. If the result is empty and the
+    server needs position fallback, tries declaration and definition
+    positions. Returns the first non-empty result.
+    """
+    result = await query_fn(file_uri, line, character)
+    if result or not client.needs_position_fallback:
+        return result
+
+    positions = await _resolve_positions(
+        client, file_uri, line, character)
+
+    for uri, ln, ch in positions[1:]:  # skip original
+        try:
+            alt = await query_fn(uri, ln, ch)
+        except Exception:
+            continue
+        if alt:
+            return alt
+    return result
+
+
+async def _prepare_with_fallback(client, file_uri, line, character,
+                                 prepare_fn, query_fn):
+    """Prepare a hierarchy item and query it, with def/decl fallback.
+
+    Tries prepareCallHierarchy/prepareTypeHierarchy from the original
+    position. If the query returns empty and the server needs position
+    fallback, tries declaration and definition positions.
+    Returns (results, lsp_item) or (None, None).
+    """
+    items = await prepare_fn(file_uri, line, character)
+    if not items:
+        return None, None
+
+    lsp_item = items[0]
+    results = await query_fn(lsp_item)
+    if results or not client.needs_position_fallback:
+        return results, lsp_item
+
+    positions = await _resolve_positions(
+        client, file_uri, line, character)
+
+    for uri, ln, ch in positions[1:]:  # skip original
+        try:
+            alt_items = await prepare_fn(uri, ln, ch)
+        except Exception:
+            continue
+        if not alt_items:
+            continue
+        try:
+            alt_results = await query_fn(alt_items[0])
+        except Exception:
+            continue
+        if alt_results:
+            return alt_results, alt_items[0]
+
+    return results, lsp_item
+
+
+def _make_call_tree_node(item, call_sites=1):
+    """Build a tree node dict from a raw LSP CallHierarchyItem."""
+    kind_num = item.get("kind", 0)
+    rng = item.get("selectionRange") or item.get("range", {})
+    start = rng.get("start", {})
+    return {
+        "name": item.get("name", "?"),
+        "kind": _SYMBOL_KIND_NAMES.get(kind_num, ""),
+        "file": _uri_to_path(item.get("uri", "")),
+        "line": start.get("line", 0) + 1,
+        "call_sites": call_sites,
+        "children": [],
+    }
+
+
+def _make_type_tree_node(item):
+    """Build a tree node dict from a raw LSP TypeHierarchyItem."""
+    kind_num = item.get("kind", 0)
+    rng = item.get("selectionRange") or item.get("range", {})
+    start = rng.get("start", {})
+    return {
+        "name": item.get("name", "?"),
+        "kind": _SYMBOL_KIND_NAMES.get(kind_num, ""),
+        "file": _uri_to_path(item.get("uri", "")),
+        "line": start.get("line", 0) + 1,
+        "children": [],
+    }
+
+
+def _node_key(node):
+    """Unique key for cycle detection."""
+    return (node["file"], node["line"], node["name"])
+
+
+_TREE_WALK_CONCURRENCY = 8
+_TREE_MAX_NODES = 250
+
+
+async def _walk_call_tree(client, node, lsp_item, direction,
+                          depth, visited, sem, node_count):
+    """Recursively expand call hierarchy into a tree.
+
+    Passes the original LSP CallHierarchyItem (with its opaque ``data``
+    field) to each server call so the server can resolve it correctly.
+    Concurrency is bounded by *sem* to avoid overwhelming the LSP server.
+
+    At depth=0, fetches children to check existence (peek-ahead) and sets
+    ``has_more=True`` on the node without expanding further.
+
+    *node_count* is a single-element list ``[n]`` tracking total nodes
+    across the recursion. When it exceeds ``_TREE_MAX_NODES``, remaining
+    nodes are marked ``has_more`` without expanding.
+    """
+    if node_count[0] >= _TREE_MAX_NODES:
+        node["has_more"] = True
+        return
+    key = _node_key(node)
+    if key in visited:
+        return
+    visited.add(key)
+
+    try:
+        async with sem:
+            if direction == "incoming":
+                calls = await client.incoming_calls(lsp_item)
+            else:
+                calls = await client.outgoing_calls(lsp_item)
+    except Exception:
+        return
+
+    if not calls:
+        return
+
+    if depth <= 0:
+        node["has_more"] = True
+        return
+
+    expand = []
+    for call in calls:
+        raw_item = (call.get("from") if direction == "incoming"
+                    else call.get("to"))
+        if raw_item is None:
+            continue
+        from_ranges = call.get("fromRanges", [])
+        call_sites = len(from_ranges) if from_ranges else 1
+        child = _make_call_tree_node(raw_item, call_sites)
+        node["children"].append(child)
+        node_count[0] += 1
+        child_key = _node_key(child)
+        if child_key not in visited:
+            expand.append((child, raw_item))
+
+    if expand:
+        await asyncio.gather(*(
+            _walk_call_tree(client, c, ri, direction,
+                            depth - 1, visited, sem, node_count)
+            for c, ri in expand
+        ))
+
+
+async def _walk_type_tree(client, node, lsp_item, direction,
+                          depth, visited, sem, node_count):
+    """Recursively expand type hierarchy into a tree.
+
+    Same bounded-concurrency + peek-ahead + circuit-breaker strategy
+    as _walk_call_tree.
+    """
+    if node_count[0] >= _TREE_MAX_NODES:
+        node["has_more"] = True
+        return
+    key = _node_key(node)
+    if key in visited:
+        return
+    visited.add(key)
+
+    try:
+        async with sem:
+            if direction == "supertypes":
+                items = await client.supertypes(lsp_item)
+            else:
+                items = await client.subtypes(lsp_item)
+    except Exception:
+        return
+
+    if not items:
+        return
+
+    if depth <= 0:
+        node["has_more"] = True
+        return
+
+    expand = []
+    for raw_item in items:
+        child = _make_type_tree_node(raw_item)
+        node["children"].append(child)
+        node_count[0] += 1
+        child_key = _node_key(child)
+        if child_key not in visited:
+            expand.append((child, raw_item))
+
+    if expand:
+        await asyncio.gather(*(
+            _walk_type_tree(client, c, ri, direction,
+                            depth - 1, visited, sem, node_count)
+            for c, ri in expand
+        ))
+
+
+def _parse_workspace_symbols(result, indexing=False):
+    """Parse workspace/symbol results into structured dicts."""
+    symbols = []
+    if result:
+        for sym in result:
+            kind_num = sym.get("kind", 0)
+            loc = sym.get("location", {})
+            uri = loc.get("uri", "")
+            rng = loc.get("range", {})
+            start = rng.get("start", {})
+            entry = {
+                "name": sym.get("name", "?"),
+                "kind": _SYMBOL_KIND_NAMES.get(kind_num,
+                                               "Unknown(%d)" % kind_num),
+                "file": _uri_to_path(uri),
+                "line": start.get("line", 0) + 1,
+            }
+            container = sym.get("containerName")
+            if container:
+                entry["container"] = container
+            symbols.append(entry)
+
+    result_dict = {"symbols": symbols}
+    if indexing:
+        result_dict["indexing"] = True
+    return result_dict
+
+
 _DIAG_SEVERITY = {1: "Error", 2: "Warning", 3: "Information", 4: "Hint"}
 
 
@@ -485,6 +962,43 @@ def _parse_diagnostics(diags, indexing=False):
     return result_dict
 
 
+def _serialize_detection_result(result):
+    """Convert a DetectionResult to a JSON-serializable dict.
+
+    Checks LSP server availability for each detected language via the
+    adapter registry, so the caller knows which servers need to be installed.
+    """
+    from karellen_lsp_mcp.lsp_adapter import get_adapter
+
+    languages = []
+    for lang in result.languages:
+        entry = {
+            "language": lang.language,
+            "build_system": lang.build_system,
+            "confidence": lang.confidence,
+        }
+        if lang.lsp_command:
+            entry["lsp_command"] = lang.lsp_command
+        if lang.details:
+            entry["details"] = lang.details
+
+        # Check if the LSP server for this language is available
+        adapter = get_adapter(lang.language)
+        if adapter is not None:
+            available, hint = adapter.check_server()
+            entry["server_available"] = available
+            if hint:
+                entry["install_hint"] = hint
+        else:
+            entry["server_available"] = True
+
+        languages.append(entry)
+    return {
+        "project_path": result.project_path,
+        "languages": languages,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Daemon
 # ---------------------------------------------------------------------------
@@ -493,13 +1007,14 @@ class Daemon:
     """The shared daemon process."""
 
     def __init__(self, idle_timeout=300, ready_timeout=120, request_timeout=60,
-                 data_dir=None):
+                 runtime_dir=None):
         self.registry = ProjectRegistry(request_timeout=request_timeout,
                                         ready_timeout=ready_timeout)
         self._idle_timeout = idle_timeout
         self.ready_timeout = ready_timeout
-        self._data_dir = data_dir or _get_data_dir()
+        self._runtime_dir = runtime_dir or _get_runtime_dir()
         self._frontends = {}  # session_id -> _FrontendSession
+        self._connection_tasks = {}  # session_id -> asyncio.Task
         self._next_session_id = 0
         self._server = None
         self._shutdown_event = asyncio.Event()
@@ -519,11 +1034,14 @@ class Daemon:
         session = _FrontendSession(session_id, reader, writer, self)
         self._frontends[session_id] = session
         self._had_client = True
+        task = asyncio.current_task()
+        self._connection_tasks[session_id] = task
         logger.info("Frontend %d connected (%d total)", session_id, len(self._frontends))
 
         try:
             await session.handle()
         finally:
+            self._connection_tasks.pop(session_id, None)
             writer.close()
             try:
                 await writer.wait_closed()
@@ -543,10 +1061,10 @@ class Daemon:
 
     async def run(self):
         """Start the daemon and serve until shutdown."""
-        data_dir = self._data_dir
-        os.makedirs(data_dir, exist_ok=True)
-        sock_path = os.path.join(data_dir, "daemon.sock")
-        lock_path = os.path.join(data_dir, "daemon.lock")
+        runtime_dir = self._runtime_dir
+        os.makedirs(runtime_dir, exist_ok=True)
+        sock_path = os.path.join(runtime_dir, "daemon.sock")
+        lock_path = os.path.join(runtime_dir, "daemon.lock")
 
         # Acquire exclusive lock — if another daemon holds it, exit
         self._lock = FileLock(lock_path)
@@ -587,12 +1105,17 @@ class Daemon:
                 except asyncio.CancelledError:
                     pass
 
-            # Close all frontend connections
-            for session in list(self._frontends.values()):
+            # Cancel all connection handler tasks so they don't
+            # try to deregister during shutdown_all
+            for task in list(self._connection_tasks.values()):
+                task.cancel()
+            for task in list(self._connection_tasks.values()):
                 try:
-                    session.writer.close()
-                except Exception:
+                    await task
+                except (asyncio.CancelledError, Exception):
                     pass
+            self._frontends.clear()
+            self._connection_tasks.clear()
 
             await self.registry.shutdown_all()
 
@@ -618,12 +1141,14 @@ def _env_int(name, default):
 
 def _get_log_path():
     """Return the path for the daemon log file."""
-    return os.path.join(_get_data_dir(), "daemon.log")
+    return os.path.join(_get_log_dir(), "daemon.log")
 
 
 def main():
-    data_dir = _get_data_dir()
-    os.makedirs(data_dir, exist_ok=True)
+    runtime_dir = _get_runtime_dir()
+    os.makedirs(runtime_dir, exist_ok=True)
+    log_dir = _get_log_dir()
+    os.makedirs(log_dir, exist_ok=True)
     log_path = _get_log_path()
     logging.basicConfig(
         level=logging.INFO,

@@ -57,6 +57,7 @@ class LspClient:
         self._notification_callbacks = {}  # method -> list of callbacks
         self._normalizer = None
         self._initialized_event = asyncio.Event()
+        self._settings = {}  # flat settings from init_options (e.g. "java.home" -> path)
         self._ready_event = asyncio.Event()
         self._indexing_done_task = None
         self._request_timeout = request_timeout
@@ -87,6 +88,10 @@ class LspClient:
         self._root_uri = root_uri
         root_path = urllib.parse.unquote(root_uri).removeprefix("file://")
 
+        # Store settings for workspace/configuration responses
+        if init_options and isinstance(init_options.get("settings"), dict):
+            self._settings = init_options["settings"]
+
         self._normalizer = create_normalizer(command, warmup_timeout=self._ready_timeout)
         self._normalizer.set_ready_callback(self._on_normalizer_ready)
 
@@ -100,28 +105,85 @@ class LspClient:
 
         self._reader_task = asyncio.create_task(self._read_loop())
 
+        _all_symbol_kinds = list(types.SymbolKind)
+        _symbol_tags = [types.SymbolTag.Deprecated]
+        _diag_tags = [types.DiagnosticTag.Unnecessary,
+                      types.DiagnosticTag.Deprecated]
+
         init_params = types.InitializeParams(
             process_id=None,
             root_uri=root_uri,
             root_path=root_path,
             capabilities=types.ClientCapabilities(
+                general=types.GeneralClientCapabilities(
+                    position_encodings=[
+                        types.PositionEncodingKind.Utf32,
+                        types.PositionEncodingKind.Utf16,
+                    ],
+                    markdown=types.MarkdownClientCapabilities(
+                        parser="markdown", version="1.0"),
+                ),
+                window=types.WindowClientCapabilities(
+                    work_done_progress=True,
+                    show_message=types.ShowMessageRequestClientCapabilities(),
+                    show_document=types.ShowDocumentClientCapabilities(
+                        support=True),
+                ),
+                workspace=types.WorkspaceClientCapabilities(
+                    configuration=True,
+                    workspace_folders=True,
+                    symbol=types.WorkspaceSymbolClientCapabilities(
+                        dynamic_registration=False,
+                        symbol_kind=types.ClientSymbolKindOptions(
+                            value_set=_all_symbol_kinds),
+                        tag_support=types.ClientSymbolTagOptions(
+                            value_set=_symbol_tags),
+                    ),
+                ),
                 text_document=types.TextDocumentClientCapabilities(
                     definition=types.DefinitionClientCapabilities(
                         dynamic_registration=False,
+                        link_support=True,
+                    ),
+                    declaration=types.DeclarationClientCapabilities(
+                        dynamic_registration=False,
+                        link_support=True,
+                    ),
+                    implementation=types.ImplementationClientCapabilities(
+                        dynamic_registration=False,
+                        link_support=True,
+                    ),
+                    type_definition=types.TypeDefinitionClientCapabilities(
+                        dynamic_registration=False,
+                        link_support=True,
                     ),
                     references=types.ReferenceClientCapabilities(
                         dynamic_registration=False,
                     ),
                     hover=types.HoverClientCapabilities(
                         dynamic_registration=False,
-                        content_format=[types.MarkupKind.Markdown, types.MarkupKind.PlainText],
+                        content_format=[types.MarkupKind.Markdown,
+                                        types.MarkupKind.PlainText],
                     ),
                     document_symbol=types.DocumentSymbolClientCapabilities(
                         dynamic_registration=False,
                         hierarchical_document_symbol_support=True,
+                        symbol_kind=types.ClientSymbolKindOptions(
+                            value_set=_all_symbol_kinds),
+                        tag_support=types.ClientSymbolTagOptions(
+                            value_set=_symbol_tags),
+                    ),
+                    document_highlight=types.DocumentHighlightClientCapabilities(
+                        dynamic_registration=False,
                     ),
                     publish_diagnostics=types.PublishDiagnosticsClientCapabilities(
                         related_information=True,
+                        tag_support=types.ClientDiagnosticsTagOptions(
+                            value_set=_diag_tags),
+                        code_description_support=True,
+                    ),
+                    diagnostic=types.DiagnosticClientCapabilities(
+                        dynamic_registration=False,
                     ),
                     call_hierarchy=types.CallHierarchyClientCapabilities(
                         dynamic_registration=False,
@@ -252,6 +314,8 @@ class LspClient:
                 ".py": "python",
                 ".rs": "rust",
                 ".java": "java",
+                ".kt": "kotlin",
+                ".kts": "kotlin",
                 ".js": "javascript",
                 ".ts": "typescript",
                 ".go": "go",
@@ -276,6 +340,25 @@ class LspClient:
         """textDocument/definition"""
         params = self._text_document_position(uri, line, character)
         return await self._request_with_retry("textDocument/definition", params)
+
+    async def declaration(self, uri, line, character):
+        """textDocument/declaration"""
+        params = self._text_document_position(uri, line, character)
+        return await self._request_with_retry("textDocument/declaration", params)
+
+    async def implementation(self, uri, line, character):
+        """textDocument/implementation"""
+        params = self._text_document_position(uri, line, character)
+        return await self._request_with_retry("textDocument/implementation", params)
+
+    async def type_definition(self, uri, line, character):
+        """textDocument/typeDefinition"""
+        params = self._text_document_position(uri, line, character)
+        return await self._request_with_retry("textDocument/typeDefinition", params)
+
+    async def workspace_symbol(self, query):
+        """workspace/symbol"""
+        return await self._request_with_retry("workspace/symbol", {"query": query})
 
     async def references(self, uri, line, character, include_declaration=True):
         """textDocument/references"""
@@ -334,6 +417,13 @@ class LspClient:
         if self._normalizer is None:
             return None
         return self._normalizer.estimated_remaining_seconds()
+
+    @property
+    def needs_position_fallback(self):
+        """Whether cross-file queries should try def/decl fallback."""
+        if self._normalizer is None:
+            return False
+        return self._normalizer.needs_position_fallback
 
     def supports_method(self, method):
         """Check if the LSP server supports the given method."""
@@ -514,14 +604,41 @@ class LspClient:
             # Server request (e.g., window/showMessage, workspace/configuration)
             # Respond with null for unsupported requests
             await self._respond_to_server_request(msg["id"], msg["method"], msg.get("params"))
+            # Also forward to normalizer — some servers (jdtls) send
+            # status updates as requests rather than notifications
+            if self._normalizer:
+                self._normalizer.on_notification(msg["method"], msg.get("params"))
 
     async def _respond_to_server_request(self, msg_id, method, params):
         """Respond to server-initiated requests with sensible defaults."""
         result = None
         if method == "workspace/configuration":
-            # Return empty config for each requested item
+            # Return settings matching each requested section
             items = (params or {}).get("items", [])
-            result = [None] * len(items)
+            result = []
+            for item in items:
+                section = item.get("section", "")
+                if self._settings and section:
+                    # Build a settings dict for this section by matching
+                    # keys that start with "{section}." and stripping
+                    # the prefix, or returning the full settings if
+                    # section is empty
+                    prefix = section + "."
+                    section_settings = {}
+                    for k, v in self._settings.items():
+                        if k.startswith(prefix):
+                            # Nest dotted keys: "import.gradle.java.home" -> {"import": {"gradle": {"java": {"home": v}}}}
+                            parts = k[len(prefix):].split(".")
+                            d = section_settings
+                            for p in parts[:-1]:
+                                d = d.setdefault(p, {})
+                            d[parts[-1]] = v
+                        elif k == section:
+                            section_settings = v
+                            break
+                    result.append(section_settings if section_settings else None)
+                else:
+                    result.append(self._settings if self._settings else None)
         elif method == "client/registerCapability":
             result = None
         elif method == "window/workDoneProgress/create":

@@ -37,6 +37,7 @@ import shutil
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 
 from karellen_lsp_mcp.daemon import Daemon, _read_message, _write_message
 
@@ -237,13 +238,20 @@ class _DaemonTestHelper:
         self.daemon = None
         self._daemon_task = None
         self._daemon_dir = None
+        self._data_dir = None
+        self._data_patch = None
         self._reader = None
         self._writer = None
         self._msg_id = 0
 
     async def start(self):
         self._daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
-        self.daemon = Daemon(idle_timeout=5, data_dir=self._daemon_dir)
+        self._data_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-data-")
+        self._data_patch = unittest.mock.patch(
+            "karellen_lsp_mcp.lsp_adapter._user_data_dir",
+            return_value=self._data_dir)
+        self._data_patch.start()
+        self.daemon = Daemon(idle_timeout=5, runtime_dir=self._daemon_dir)
         self._daemon_task = asyncio.create_task(self.daemon.run())
         sock_path = os.path.join(self._daemon_dir, "daemon.sock")
         for _ in range(50):
@@ -270,8 +278,12 @@ class _DaemonTestHelper:
                 await asyncio.wait_for(self._daemon_task, timeout=10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
+        if self._data_patch:
+            self._data_patch.stop()
         if self._daemon_dir:
             shutil.rmtree(self._daemon_dir, ignore_errors=True)
+        if self._data_dir:
+            shutil.rmtree(self._data_dir, ignore_errors=True)
 
     async def request(self, method, params=None):
         self._msg_id += 1
@@ -321,46 +333,42 @@ class DaemonLspIntegrationTest(unittest.TestCase):
         logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
         cls._tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-itest-")
         cls._files = _create_project(cls._tmpdir)
+        cls._loop = asyncio.new_event_loop()
+        cls._helper = _DaemonTestHelper()
+        cls._loop.run_until_complete(cls._helper.start())
+        # Register as C++ project with background indexing
+        result = cls._loop.run_until_complete(
+            cls._helper.request("register_project", {
+                "project_path": cls._tmpdir,
+                "language": "cpp",
+                "lsp_command": ["clangd", "--background-index"],
+                "build_info": {"compile_commands_dir": cls._tmpdir},
+            })
+        )
+        cls._project_id = result["project_id"]
+        # Pre-open all source files so clangd indexes them
+        for f in cls._files.values():
+            cls._loop.run_until_complete(cls._helper.request(
+                "lsp_document_symbols", {
+                    "project_id": cls._project_id,
+                    "file_path": f,
+                }))
 
     @classmethod
     def tearDownClass(cls):
+        try:
+            cls._loop.run_until_complete(
+                cls._helper.request("deregister_project",
+                                    {"project_id": cls._project_id}))
+        except Exception:
+            pass
+        cls._loop.run_until_complete(cls._helper.stop())
+        cls._loop.close()
         shutil.rmtree(cls._tmpdir, ignore_errors=True)
         logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
 
-    def setUp(self):
-        self._loop = asyncio.new_event_loop()
-        self._helper = _DaemonTestHelper()
-        self._loop.run_until_complete(self._helper.start())
-        # Register as C++ project with background indexing
-        result = self._loop.run_until_complete(
-            self._helper.request("register_project", {
-                "project_path": self._tmpdir,
-                "language": "cpp",
-                "lsp_command": ["clangd", "--background-index"],
-                "build_info": {"compile_commands_dir": self._tmpdir},
-            })
-        )
-        self._project_id = result["project_id"]
-        # Pre-open all source files so clangd indexes them
-        for f in self._files.values():
-            self._request("lsp_document_symbols", {
-                "project_id": self._project_id,
-                "file_path": f,
-            })
-
-    def tearDown(self):
-        try:
-            self._loop.run_until_complete(
-                self._helper.request("deregister_project",
-                                     {"project_id": self._project_id})
-            )
-        except Exception:
-            pass
-        self._loop.run_until_complete(self._helper.stop())
-        self._loop.close()
-
     def _request(self, method, params):
-        return self._loop.run_until_complete(self._helper.request(method, params))
+        return self._loop.run_until_complete(self.__class__._helper.request(method, params))
 
     # --- Lifecycle ---
 
@@ -368,7 +376,7 @@ class DaemonLspIntegrationTest(unittest.TestCase):
         projects = self._request("list_projects", {})
         self.assertEqual(len(projects), 1)
         self.assertEqual(projects[0]["project_id"], self._project_id)
-        self.assertEqual(projects[0]["language"], "cpp")
+        self.assertEqual(projects[0]["language"], "c")
         self.assertEqual(projects[0]["refcount"], 1)
         self.assertIn(projects[0]["status"], ("indexing", "ready"))
 
@@ -430,12 +438,12 @@ class DaemonLspIntegrationTest(unittest.TestCase):
     # --- Definition ---
 
     def test_definition_of_add_from_main(self):
-        # main.cpp line 5: "int sum = add(10, 20);"
+        # main.cpp line 6 (1-based): "int sum = add(10, 20);"
         result = self._request("lsp_read_definition", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 5,
-            "character": 14,
+            "line": 6,
+            "character": 15,
         })
         self.assertGreater(len(result["locations"]), 0)
         files = [loc["file"] for loc in result["locations"]]
@@ -443,12 +451,12 @@ class DaemonLspIntegrationTest(unittest.TestCase):
                         "Expected math_utils in: %s" % files)
 
     def test_definition_of_circle_constructor(self):
-        # main.cpp line 16: "Circle c(5.0);"
+        # main.cpp line 17 (1-based): "Circle c(5.0);"
         result = self._request("lsp_read_definition", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 16,
-            "character": 4,
+            "line": 17,
+            "character": 5,
         })
         self.assertGreater(len(result["locations"]), 0)
         files = [loc["file"] for loc in result["locations"]]
@@ -456,12 +464,12 @@ class DaemonLspIntegrationTest(unittest.TestCase):
                         "Expected shapes in: %s" % files)
 
     def test_definition_of_dot_product(self):
-        # main.cpp line 13: "double dp = dot_product(v1, v2);"
+        # main.cpp line 14 (1-based): "double dp = dot_product(v1, v2);"
         result = self._request("lsp_read_definition", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 13,
-            "character": 16,
+            "line": 14,
+            "character": 17,
         })
         self.assertGreater(len(result["locations"]), 0)
         files = [loc["file"] for loc in result["locations"]]
@@ -476,20 +484,20 @@ class DaemonLspIntegrationTest(unittest.TestCase):
         result = self._request("lsp_find_references", {
             "project_id": self._project_id,
             "file_path": self._files["math_utils.cpp"],
-            "line": 2,
-            "character": 4,
+            "line": 3,
+            "character": 5,
         })
         self.assertGreaterEqual(len(result["locations"]), 2)
 
     def test_find_references_of_area(self):
         # area() is declared in Shape, overridden in Circle and Rectangle,
         # called in print_shape_info
-        # shapes.h line 6: "virtual double area() const = 0;"
+        # shapes.h line 7 (1-based): "virtual double area() const = 0;"
         result = self._request("lsp_find_references", {
             "project_id": self._project_id,
             "file_path": self._files["shapes.h"],
-            "line": 6,
-            "character": 19,
+            "line": 7,
+            "character": 20,
         })
         # Declaration + overrides + call site
         self.assertGreaterEqual(len(result["locations"]), 2)
@@ -497,34 +505,34 @@ class DaemonLspIntegrationTest(unittest.TestCase):
     # --- Hover ---
 
     def test_hover_on_add(self):
-        # main.cpp line 5: "int sum = add(10, 20);"
+        # main.cpp line 6 (1-based): "int sum = add(10, 20);"
         result = self._request("lsp_hover", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 5,
-            "character": 14,
+            "line": 6,
+            "character": 15,
         })
         self.assertIsNotNone(result.get("content"))
         # Check full result dict contains "int" somewhere
         self.assertIn("int", str(result))
 
     def test_hover_on_vector2d(self):
-        # main.cpp line 11: "    Vector2D v1 = {1.0, 2.0};"
+        # main.cpp line 12 (1-based): "    Vector2D v1 = {1.0, 2.0};"
         result = self._request("lsp_hover", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 11,
-            "character": 4,
+            "line": 12,
+            "character": 5,
         })
         self.assertIn("Vector2D", str(result))
 
     def test_hover_on_circle(self):
-        # main.cpp line 16: "Circle c(5.0);"
+        # main.cpp line 17 (1-based): "Circle c(5.0);"
         result = self._request("lsp_hover", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 16,
-            "character": 4,
+            "line": 17,
+            "character": 5,
         })
         self.assertIn("Circle", str(result))
 
@@ -535,8 +543,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
         result = self._request("lsp_call_hierarchy_incoming", {
             "project_id": self._project_id,
             "file_path": self._files["math_utils.cpp"],
-            "line": 2,
-            "character": 4,
+            "line": 3,
+            "character": 5,
         })
         self.assertEqual(result["direction"], "incoming")
         names = [item["name"] for item in result["items"]]
@@ -548,8 +556,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             result = self._request("lsp_call_hierarchy_outgoing", {
                 "project_id": self._project_id,
                 "file_path": self._files["math_utils.cpp"],
-                "line": 10,
-                "character": 4,
+                "line": 11,
+                "character": 5,
             })
         except RuntimeError as e:
             if "does not support" in str(e):
@@ -566,8 +574,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             result = self._request("lsp_call_hierarchy_outgoing", {
                 "project_id": self._project_id,
                 "file_path": self._files["main.cpp"],
-                "line": 4,
-                "character": 4,
+                "line": 5,
+                "character": 5,
             })
         except RuntimeError as e:
             if "does not support" in str(e):
@@ -581,12 +589,12 @@ class DaemonLspIntegrationTest(unittest.TestCase):
 
     def test_type_hierarchy_supertypes_of_circle(self):
         # Circle inherits from Shape
-        # shapes.h line 10: "class Circle : public Shape {"
+        # shapes.h line 11 (1-based): "class Circle : public Shape {"
         result = self._request("lsp_type_hierarchy_supertypes", {
             "project_id": self._project_id,
             "file_path": self._files["shapes.h"],
-            "line": 10,
-            "character": 6,
+            "line": 11,
+            "character": 7,
         })
         self.assertEqual(result["direction"], "supertypes")
         names = [item["name"] for item in result["items"]]
@@ -594,24 +602,24 @@ class DaemonLspIntegrationTest(unittest.TestCase):
 
     def test_type_hierarchy_supertypes_of_rectangle(self):
         # Rectangle inherits from Shape
-        # shapes.h line 20: "class Rectangle : public Shape {"
+        # shapes.h line 21 (1-based): "class Rectangle : public Shape {"
         result = self._request("lsp_type_hierarchy_supertypes", {
             "project_id": self._project_id,
             "file_path": self._files["shapes.h"],
-            "line": 20,
-            "character": 6,
+            "line": 21,
+            "character": 7,
         })
         names = [item["name"] for item in result["items"]]
         self.assertIn("Shape", names)
 
     def test_type_hierarchy_subtypes_of_shape(self):
         # Shape has subtypes Circle and Rectangle
-        # shapes.h line 3: "class Shape {"
+        # shapes.h line 4 (1-based): "class Shape {"
         result = self._request("lsp_type_hierarchy_subtypes", {
             "project_id": self._project_id,
             "file_path": self._files["shapes.h"],
-            "line": 3,
-            "character": 6,
+            "line": 4,
+            "character": 7,
         })
         names = [item["name"] for item in result["items"]]
         has_subtypes = "Circle" in names or "Rectangle" in names
@@ -651,8 +659,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             self._request("lsp_read_definition", {
                 "project_id": self._project_id,
                 "file_path": "relative/path.cpp",
-                "line": 0,
-                "character": 0,
+                "line": 1,
+                "character": 1,
             })
         self.assertIn("must be absolute", str(ctx.exception))
 
@@ -665,8 +673,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
                 self._request("lsp_read_definition", {
                     "project_id": self._project_id,
                     "file_path": outside,
-                    "line": 0,
-                    "character": 0,
+                    "line": 1,
+                    "character": 1,
                 })
             self.assertIn("not under project root", str(ctx.exception))
         finally:
@@ -678,23 +686,66 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             self._request("lsp_read_definition", {
                 "project_id": "nonexistent1234",
                 "file_path": self._files["main.cpp"],
-                "line": 0,
-                "character": 0,
+                "line": 1,
+                "character": 1,
             })
         self.assertIn("Unknown project", str(ctx.exception))
 
-    # --- Force re-register ---
+    # test_force_register_restarts_lsp moved to DaemonForceRegisterTest
+
+
+class DaemonForceRegisterTest(unittest.TestCase):
+    """Tests that mutate daemon state (force restart) — isolated with own daemon."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_clangd()
+        cls._log_handler = logging.StreamHandler()
+        cls._log_handler.setLevel(logging.DEBUG)
+        logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
+        cls._tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-itest-force-")
+        cls._files = _create_project(cls._tmpdir)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
+
+    def setUp(self):
+        self._loop = asyncio.new_event_loop()
+        self._helper = _DaemonTestHelper()
+        self._loop.run_until_complete(self._helper.start())
+        result = self._loop.run_until_complete(
+            self._helper.request("register_project", {
+                "project_path": self._tmpdir,
+                "language": "cpp",
+                "lsp_command": ["clangd", "--background-index"],
+                "build_info": {"compile_commands_dir": self._tmpdir},
+            }))
+        self._project_id = result["project_id"]
+
+    def tearDown(self):
+        try:
+            self._loop.run_until_complete(
+                self._helper.request("deregister_project",
+                                     {"project_id": self._project_id}))
+        except Exception:
+            pass
+        self._loop.run_until_complete(self._helper.stop())
+        self._loop.close()
 
     def test_force_register_restarts_lsp(self):
-        result = self._request("register_project", {
-            "project_path": self._tmpdir,
-            "language": "cpp",
-            "build_info": {"compile_commands_dir": self._tmpdir},
-            "force": True,
-        })
+        result = self._loop.run_until_complete(
+            self._helper.request("register_project", {
+                "project_path": self._tmpdir,
+                "language": "cpp",
+                "build_info": {"compile_commands_dir": self._tmpdir},
+                "force": True,
+            }))
         self.assertEqual(result["project_id"], self._project_id)
 
-        projects = self._request("list_projects", {})
+        projects = self._loop.run_until_complete(
+            self._helper.request("list_projects", {}))
         self.assertEqual(len(projects), 1)
         self.assertIn(projects[0]["status"], ("indexing", "ready"))
 
@@ -725,7 +776,12 @@ class DaemonMultiFrontendTest(unittest.TestCase):
 
         async def run():
             daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
-            daemon = Daemon(idle_timeout=5, data_dir=daemon_dir)
+            data_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-data-")
+            data_patch = unittest.mock.patch(
+                "karellen_lsp_mcp.lsp_adapter._user_data_dir",
+                return_value=data_dir)
+            data_patch.start()
+            daemon = Daemon(idle_timeout=5, runtime_dir=daemon_dir)
             daemon_task = asyncio.create_task(daemon.run())
 
             sock_path = os.path.join(daemon_dir, "daemon.sock")
@@ -792,7 +848,9 @@ class DaemonMultiFrontendTest(unittest.TestCase):
             w2.close()
             daemon._shutdown_event.set()
             await asyncio.wait_for(daemon_task, timeout=10)
+            data_patch.stop()
             shutil.rmtree(daemon_dir, ignore_errors=True)
+            shutil.rmtree(data_dir, ignore_errors=True)
 
         loop.run_until_complete(run())
         loop.close()
@@ -802,7 +860,12 @@ class DaemonMultiFrontendTest(unittest.TestCase):
 
         async def run():
             daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
-            daemon = Daemon(idle_timeout=5, data_dir=daemon_dir)
+            data_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-data-")
+            data_patch = unittest.mock.patch(
+                "karellen_lsp_mcp.lsp_adapter._user_data_dir",
+                return_value=data_dir)
+            data_patch.start()
+            daemon = Daemon(idle_timeout=5, runtime_dir=daemon_dir)
             daemon_task = asyncio.create_task(daemon.run())
 
             sock_path = os.path.join(daemon_dir, "daemon.sock")
@@ -840,7 +903,9 @@ class DaemonMultiFrontendTest(unittest.TestCase):
 
             daemon._shutdown_event.set()
             await asyncio.wait_for(daemon_task, timeout=10)
+            data_patch.stop()
             shutil.rmtree(daemon_dir, ignore_errors=True)
+            shutil.rmtree(data_dir, ignore_errors=True)
 
         loop.run_until_complete(run())
         loop.close()

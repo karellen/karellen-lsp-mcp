@@ -30,18 +30,25 @@ from karellen_lsp_mcp.daemon_client import DaemonClient, DaemonClientError
 from karellen_lsp_mcp.types import (
     LocationResult, Location, HoverResult, DocumentSymbolsResult, SymbolInfo,
     CallHierarchyResult, CallHierarchyItem, TypeHierarchyResult, TypeHierarchyItem,
+    CallTreeResult, CallTreeNode, TypeTreeResult, TypeTreeNode,
+    WorkspaceSymbolsResult, WorkspaceSymbolInfo,
     DiagnosticsResult, Diagnostic, ProjectInfo, RegisterResult, StringResult,
-    IndexingStatusResult, IndexingTask,
+    IndexingStatusResult, IndexingTask, DetectedLanguageInfo, DetectResult,
+    ScannedLanguageInfo, ScanResult,
 )
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("karellen-lsp-mcp", instructions=(
     "LSP-backed code intelligence server. Use lsp_register_project to register a project "
-    "with its language, then use query tools (lsp_read_definition, lsp_find_references, "
-    "lsp_hover, lsp_document_symbols, lsp_call_hierarchy_incoming, lsp_call_hierarchy_outgoing, "
-    "lsp_type_hierarchy_supertypes, lsp_type_hierarchy_subtypes, lsp_diagnostics) "
-    "to introspect code. All line/character positions are 0-based (LSP convention)."
+    "with its language, then use query tools to introspect code. "
+    "Navigation: lsp_read_definition, lsp_read_declaration, lsp_read_type_definition, "
+    "lsp_find_implementations, lsp_find_references, lsp_hover. "
+    "Symbols: lsp_document_symbols, lsp_workspace_symbols. "
+    "Hierarchy: lsp_call_tree_incoming/outgoing, lsp_type_tree_supertypes/subtypes "
+    "(recursive; prefer over single-level lsp_call_hierarchy_*/lsp_type_hierarchy_*). "
+    "Diagnostics: lsp_diagnostics. "
+    "All line/character positions are 1-based."
 ))
 
 _client = None
@@ -148,6 +155,48 @@ def _to_type_hierarchy_result(data):
                                indexing=data.get("indexing", False))
 
 
+def _to_call_tree_node(data):
+    if data is None:
+        return None
+    children = [_to_call_tree_node(c) for c in data.get("children", [])]
+    return CallTreeNode(name=data["name"], kind=data["kind"], file=data["file"],
+                        line=data["line"], call_sites=data.get("call_sites", 1),
+                        children=children,
+                        has_more=data.get("has_more", False))
+
+
+def _to_call_tree_result(data):
+    root = _to_call_tree_node(data.get("root"))
+    return CallTreeResult(direction=data["direction"], root=root,
+                          indexing=data.get("indexing", False),
+                          truncated=data.get("truncated", False))
+
+
+def _to_type_tree_node(data):
+    if data is None:
+        return None
+    children = [_to_type_tree_node(c) for c in data.get("children", [])]
+    return TypeTreeNode(name=data["name"], kind=data["kind"], file=data["file"],
+                        line=data["line"], children=children,
+                        has_more=data.get("has_more", False))
+
+
+def _to_type_tree_result(data):
+    root = _to_type_tree_node(data.get("root"))
+    return TypeTreeResult(direction=data["direction"], root=root,
+                          indexing=data.get("indexing", False),
+                          truncated=data.get("truncated", False))
+
+
+def _to_workspace_symbols_result(data):
+    symbols = [WorkspaceSymbolInfo(
+        name=s["name"], kind=s["kind"], file=s["file"],
+        line=s["line"], container=s.get("container"))
+        for s in data.get("symbols", [])]
+    return WorkspaceSymbolsResult(symbols=symbols,
+                                  indexing=data.get("indexing", False))
+
+
 def _to_diagnostics_result(data):
     diagnostics = [Diagnostic(line=d["line"], character=d["character"],
                               severity=d["severity"], message=d["message"],
@@ -160,7 +209,61 @@ def _to_diagnostics_result(data):
 
 @mcp.tool()
 @_tag_errors
-async def lsp_register_project(project_path: str, language: str,
+async def lsp_scan_languages(project_path: str) -> ScanResult:
+    """Scan a project directory for source file types and recommend LSP registrations.
+
+    A lightweight alternative to lsp_detect_project — simply counts file extensions
+    and maps them to known languages. Use this for a quick overview of what languages
+    are present before deciding which to register. Does not analyze build systems
+    or IDE metadata.
+
+    Args:
+        project_path: Absolute path to the project root directory.
+    """
+    result = await _request("scan_languages", {"project_path": project_path})
+    languages = [ScannedLanguageInfo(
+        language=lang["language"],
+        label=lang["label"],
+        extensions=lang["extensions"],
+        file_count=lang["file_count"],
+        adapter_available=lang.get("adapter_available", False),
+        server_available=lang.get("server_available", False),
+        install_hint=lang.get("install_hint"),
+    ) for lang in result.get("languages", [])]
+    return ScanResult(project_path=result["project_path"],
+                      languages=languages,
+                      total_files=result.get("total_files", 0))
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_detect_project(project_path: str) -> DetectResult:
+    """Detect languages and build systems in a project without registering.
+
+    Scans the project directory for build system markers (build.gradle, pom.xml, etc.)
+    and IDE metadata (.idea/, .classpath, .vscode/) to determine what languages and
+    build systems are present. Uses a credibility hierarchy when multiple sources
+    provide conflicting information (build config > IDE sync > IDE settings > filesystem).
+
+    Args:
+        project_path: Absolute path to the project root directory.
+    """
+    result = await _request("detect_project", {"project_path": project_path})
+    languages = [DetectedLanguageInfo(
+        language=lang["language"],
+        build_system=lang.get("build_system"),
+        confidence=lang.get("confidence", "high"),
+        lsp_command=lang.get("lsp_command"),
+        details=lang.get("details"),
+        server_available=lang.get("server_available", True),
+        install_hint=lang.get("install_hint"),
+    ) for lang in result.get("languages", [])]
+    return DetectResult(project_path=result["project_path"], languages=languages)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_register_project(project_path: str, language: str = None,
                                lsp_command: list[str] = None,
                                build_info: dict = None,
                                force: bool = False) -> RegisterResult:
@@ -170,7 +273,8 @@ async def lsp_register_project(project_path: str, language: str,
 
     Args:
         project_path: Absolute path to the project root directory.
-        language: Language identifier (e.g. "c", "cpp", "python", "rust").
+        language: Language identifier (e.g. "c", "cpp", "java", "python", "rust").
+                  If omitted, auto-detects from build system markers and IDE metadata.
         lsp_command: Custom LSP server command (e.g. ["clangd", "--background-index"]).
                      If omitted, uses the default for the language.
         build_info: Optional build configuration dict. For C/C++:
@@ -246,10 +350,74 @@ async def lsp_read_definition(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_read_definition", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+    })
+    return _to_location_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_read_declaration(project_id: str, file_path: str,
+                               line: int, character: int) -> LocationResult:
+    """Go to declaration of the symbol at the given position.
+
+    In C/C++, this navigates to the header declaration (vs definition in
+    the source file). In Java, this navigates to the interface method
+    declaration (vs the implementation).
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 1-based line number.
+        character: 1-based character offset.
+    """
+    result = await _request("lsp_read_declaration", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+    })
+    return _to_location_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_find_implementations(project_id: str, file_path: str,
+                                   line: int, character: int) -> LocationResult:
+    """Find all implementations of an interface or abstract method/class.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 1-based line number.
+        character: 1-based character offset.
+    """
+    result = await _request("lsp_find_implementations", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+    })
+    return _to_location_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_read_type_definition(project_id: str, file_path: str,
+                                   line: int, character: int) -> LocationResult:
+    """Go to the type definition of the symbol at the given position.
+
+    Navigates from a variable or expression to the definition of its type.
+    For example, from a variable of type Foo to the class Foo definition.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 1-based line number.
+        character: 1-based character offset.
+    """
+    result = await _request("lsp_read_type_definition", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
     })
@@ -266,8 +434,8 @@ async def lsp_find_references(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
         include_declaration: Include the declaration in results (default True).
     """
     result = await _request("lsp_find_references", {
@@ -287,8 +455,8 @@ async def lsp_hover(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_hover", {
         "project_id": project_id, "file_path": file_path,
@@ -321,8 +489,8 @@ async def lsp_call_hierarchy_incoming(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_call_hierarchy_incoming", {
         "project_id": project_id, "file_path": file_path,
@@ -340,8 +508,8 @@ async def lsp_call_hierarchy_outgoing(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_call_hierarchy_outgoing", {
         "project_id": project_id, "file_path": file_path,
@@ -359,8 +527,8 @@ async def lsp_type_hierarchy_supertypes(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_type_hierarchy_supertypes", {
         "project_id": project_id, "file_path": file_path,
@@ -378,14 +546,126 @@ async def lsp_type_hierarchy_subtypes(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_type_hierarchy_subtypes", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
     })
     return _to_type_hierarchy_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_call_tree_incoming(project_id: str, file_path: str,
+                                 line: int, character: int,
+                                 max_depth: int = 3) -> CallTreeResult:
+    """Recursively find all callers of the function/method, returning a full tree.
+
+    Walks the incoming call hierarchy up to max_depth levels, with cycle detection.
+    Returns a tree rooted at the target function, where each node's children are
+    its callers.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 1-based line number.
+        character: 1-based character offset.
+        max_depth: Maximum depth of returned tree (default 3). Nodes at the
+                   boundary have has_more=true if deeper levels exist.
+                   Increase to explore further.
+    """
+    result = await _request("lsp_call_tree_incoming", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+        "max_depth": max_depth,
+    })
+    return _to_call_tree_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_call_tree_outgoing(project_id: str, file_path: str,
+                                 line: int, character: int,
+                                 max_depth: int = 3) -> CallTreeResult:
+    """Recursively find all functions called by the function, returning a full tree.
+
+    Walks the outgoing call hierarchy up to max_depth levels, with cycle detection.
+    Returns a tree rooted at the target function, where each node's children are
+    the functions it calls.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 1-based line number.
+        character: 1-based character offset.
+        max_depth: Maximum depth of returned tree (default 3). Nodes at the
+                   boundary have has_more=true if deeper levels exist.
+                   Increase to explore further.
+    """
+    result = await _request("lsp_call_tree_outgoing", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+        "max_depth": max_depth,
+    })
+    return _to_call_tree_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_type_tree_supertypes(project_id: str, file_path: str,
+                                   line: int, character: int,
+                                   max_depth: int = 3) -> TypeTreeResult:
+    """Recursively find all supertypes (base classes/interfaces), returning a full tree.
+
+    Walks the type hierarchy upward up to max_depth levels, with cycle detection.
+    Returns a tree rooted at the target type, where each node's children are
+    its supertypes.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 1-based line number.
+        character: 1-based character offset.
+        max_depth: Maximum depth of returned tree (default 3). Nodes at the
+                   boundary have has_more=true if deeper levels exist.
+                   Increase to explore further.
+    """
+    result = await _request("lsp_type_tree_supertypes", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+        "max_depth": max_depth,
+    })
+    return _to_type_tree_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_type_tree_subtypes(project_id: str, file_path: str,
+                                 line: int, character: int,
+                                 max_depth: int = 3) -> TypeTreeResult:
+    """Recursively find all subtypes (derived classes/implementations), returning a full tree.
+
+    Walks the type hierarchy downward up to max_depth levels, with cycle detection.
+    Returns a tree rooted at the target type, where each node's children are
+    its subtypes.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        file_path: Absolute path to the source file.
+        line: 1-based line number.
+        character: 1-based character offset.
+        max_depth: Maximum depth of returned tree (default 3). Nodes at the
+                   boundary have has_more=true if deeper levels exist.
+                   Increase to explore further.
+    """
+    result = await _request("lsp_type_tree_subtypes", {
+        "project_id": project_id, "file_path": file_path,
+        "line": line, "character": character,
+        "max_depth": max_depth,
+    })
+    return _to_type_tree_result(result)
 
 
 @mcp.tool()
@@ -401,6 +681,25 @@ async def lsp_diagnostics(project_id: str, file_path: str) -> DiagnosticsResult:
         "project_id": project_id, "file_path": file_path,
     })
     return _to_diagnostics_result(result)
+
+
+@mcp.tool()
+@_tag_errors
+async def lsp_workspace_symbols(project_id: str,
+                                query: str) -> WorkspaceSymbolsResult:
+    """Search for symbols across the entire project by name or pattern.
+
+    Returns matching symbols from all files in the project. Useful for finding
+    types, functions, and classes by name without knowing which file they are in.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+        query: Symbol name or pattern to search for.
+    """
+    result = await _request("lsp_workspace_symbols", {
+        "project_id": project_id, "query": query,
+    })
+    return _to_workspace_symbols_result(result)
 
 
 def _watch_parent():

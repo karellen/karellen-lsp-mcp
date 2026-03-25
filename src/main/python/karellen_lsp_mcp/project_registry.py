@@ -21,14 +21,10 @@ import logging
 import os
 import urllib.parse
 
+from karellen_lsp_mcp.lsp_adapter import get_adapter, canonicalize_language
 from karellen_lsp_mcp.lsp_client import LspClient
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_LSP_COMMANDS = {
-    "c": ["clangd"],
-    "cpp": ["clangd"],
-}
 
 
 class ProjectRegistryError(Exception):
@@ -55,28 +51,6 @@ def _compute_project_id(real_path, language):
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
-def _build_lsp_command(language, lsp_command, build_info):
-    """Build the full LSP server command, applying build_info options."""
-    if lsp_command:
-        cmd = list(lsp_command)
-    else:
-        default = DEFAULT_LSP_COMMANDS.get(language)
-        if default is None:
-            raise ProjectRegistryError("No default LSP command for language '%s'" % language)
-        cmd = list(default)
-
-    if language in ("c", "cpp") and cmd[0].endswith("clangd"):
-        bi = build_info or {}
-        if bi.get("compile_commands_dir"):
-            cmd.append("--compile-commands-dir=%s" % bi["compile_commands_dir"])
-        elif bi.get("build_dir"):
-            cc_path = os.path.join(bi["build_dir"], "compile_commands.json")
-            if os.path.exists(cc_path):
-                cmd.append("--compile-commands-dir=%s" % bi["build_dir"])
-
-    return cmd
-
-
 class ProjectRegistry:
     """Manages project registrations and their LSP client instances."""
 
@@ -87,13 +61,14 @@ class ProjectRegistry:
         self._lock = asyncio.Lock()
 
     async def register(self, project_path, language, lsp_command=None,
-                       build_info=None, force=False):
+                       build_info=None, init_options=None,
+                       detection_details=None, force=False):
         """Register a project, starting LSP server if new. Returns project_id."""
         real_path = os.path.realpath(project_path)
         if not os.path.isdir(real_path):
             raise ProjectRegistryError("Project path does not exist: %s" % real_path)
 
-        language = language.lower()
+        language = canonicalize_language(language.lower())
         project_id = _compute_project_id(real_path, language)
 
         async with self._lock:
@@ -108,8 +83,29 @@ class ProjectRegistry:
             if project_id in self._projects and force:
                 await self._stop_entry(self._projects[project_id])
 
-            cmd = _build_lsp_command(language, lsp_command, build_info)
-            root_uri = "file://%s" % urllib.parse.quote(real_path, safe="/:@")
+            # Use adapter to build LSP configuration
+            adapter = get_adapter(language)
+            if adapter is not None:
+                try:
+                    config = adapter.configure(
+                        real_path, language,
+                        lsp_command=lsp_command,
+                        build_info=build_info,
+                        detection_details=detection_details,
+                    )
+                    cmd = config.command
+                    root_uri = config.root_uri
+                    if config.init_options and init_options is None:
+                        init_options = config.init_options
+                except ValueError as e:
+                    raise ProjectRegistryError(str(e)) from e
+            else:
+                if lsp_command:
+                    cmd = list(lsp_command)
+                else:
+                    raise ProjectRegistryError(
+                        "No LSP adapter for language '%s'" % language)
+                root_uri = "file://%s" % urllib.parse.quote(real_path, safe="/:@")
 
             entry = _ProjectEntry(project_id, real_path, language, cmd, build_info)
             entry.status = "starting"
@@ -118,7 +114,7 @@ class ProjectRegistry:
             try:
                 client = LspClient(request_timeout=self._request_timeout,
                                    ready_timeout=self._ready_timeout)
-                await client.start(cmd, root_uri)
+                await client.start(cmd, root_uri, init_options=init_options)
                 entry.client = client
                 entry.status = client.state_name
                 entry.refcount = 1

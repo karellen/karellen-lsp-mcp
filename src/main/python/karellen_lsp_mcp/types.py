@@ -84,6 +84,58 @@ class TypeHierarchyResult:
 
 
 @dataclass
+class CallTreeNode:
+    name: str
+    kind: str
+    file: str
+    line: int
+    call_sites: int = 1
+    children: list["CallTreeNode"] = field(default_factory=list)
+    has_more: bool = False
+
+
+@dataclass
+class CallTreeResult:
+    direction: str
+    root: Optional["CallTreeNode"] = None
+    indexing: bool = False
+    truncated: bool = False
+
+
+@dataclass
+class TypeTreeNode:
+    name: str
+    kind: str
+    file: str
+    line: int
+    children: list["TypeTreeNode"] = field(default_factory=list)
+    has_more: bool = False
+
+
+@dataclass
+class TypeTreeResult:
+    direction: str
+    root: Optional["TypeTreeNode"] = None
+    indexing: bool = False
+    truncated: bool = False
+
+
+@dataclass
+class WorkspaceSymbolInfo:
+    name: str
+    kind: str
+    file: str
+    line: int
+    container: Optional[str] = None
+
+
+@dataclass
+class WorkspaceSymbolsResult:
+    symbols: list[WorkspaceSymbolInfo]
+    indexing: bool = False
+
+
+@dataclass
 class Diagnostic:
     line: int
     character: int
@@ -130,3 +182,38 @@ class IndexingStatusResult:
 @dataclass
 class StringResult:
     result: str
+
+
+@dataclass
+class DetectedLanguageInfo:
+    language: str
+    build_system: Optional[str] = None
+    confidence: str = "high"
+    lsp_command: Optional[list[str]] = None
+    details: Optional[dict] = None
+    server_available: bool = True
+    install_hint: Optional[str] = None
+
+
+@dataclass
+class ScannedLanguageInfo:
+    language: str
+    label: str
+    extensions: list[str]
+    file_count: int
+    adapter_available: bool = False
+    server_available: bool = False
+    install_hint: Optional[str] = None
+
+
+@dataclass
+class ScanResult:
+    project_path: str
+    languages: list[ScannedLanguageInfo] = field(default_factory=list)
+    total_files: int = 0
+
+
+@dataclass
+class DetectResult:
+    project_path: str
+    languages: list[DetectedLanguageInfo] = field(default_factory=list)

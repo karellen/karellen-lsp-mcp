@@ -151,60 +151,66 @@ def _create_project(tmpdir):
 # ---------------------------------------------------------------------------
 
 class _ServerTestBase(unittest.TestCase):
-    """Base class providing daemon lifecycle, socket patching, and logging setup."""
+    """Base class providing daemon lifecycle, socket patching, and logging setup.
+
+    Daemon is started once per test class (setUpClass) and shared across all
+    test methods, so clangd is only spawned/indexed once.
+    """
 
     @classmethod
     def setUpClass(cls):
         _skip_if_no_clangd()
-        # StreamHandler() with no args resolves sys.stderr at emit time,
-        # so PyBuilder's stderr redirection captures the output.
         cls._log_handler = logging.StreamHandler()
         cls._log_handler.setLevel(logging.DEBUG)
         logging.getLogger("karellen_lsp_mcp").addHandler(cls._log_handler)
-
-    @classmethod
-    def tearDownClass(cls):
-        logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
-
-    def setUp(self):
-        self._loop = asyncio.new_event_loop()
-        self._daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
-        self._sock_patch = unittest.mock.patch(
+        cls._loop = asyncio.new_event_loop()
+        cls._daemon_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-daemon-")
+        cls._data_dir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-data-")
+        cls._data_patch = unittest.mock.patch(
+            "karellen_lsp_mcp.lsp_adapter._user_data_dir",
+            return_value=cls._data_dir)
+        cls._data_patch.start()
+        cls._sock_patch = unittest.mock.patch(
             "karellen_lsp_mcp.daemon_client.get_socket_path",
-            return_value=os.path.join(self._daemon_dir, "daemon.sock"))
-        self._sock_patch.start()
-        self._daemon = Daemon(idle_timeout=5, data_dir=self._daemon_dir)
-        self._daemon_task = self._loop.create_task(self._daemon.run())
-        sock_path = os.path.join(self._daemon_dir, "daemon.sock")
-        self._loop.run_until_complete(self._wait_for_socket(sock_path))
+            return_value=os.path.join(cls._daemon_dir, "daemon.sock"))
+        cls._sock_patch.start()
+        cls._daemon = Daemon(idle_timeout=5, runtime_dir=cls._daemon_dir)
+        cls._daemon_task = cls._loop.create_task(cls._daemon.run())
+        sock_path = os.path.join(cls._daemon_dir, "daemon.sock")
+        cls._loop.run_until_complete(cls._wait_for_socket(sock_path))
         server_mod._client = None
 
-    async def _wait_for_socket(self, sock_path):
+    @classmethod
+    async def _wait_for_socket(cls, sock_path):
         for _ in range(50):
             if os.path.exists(sock_path):
                 return
             await asyncio.sleep(0.1)
         raise RuntimeError("Daemon socket did not appear")
 
-    def tearDown(self):
+    @classmethod
+    def tearDownClass(cls):
         if server_mod._client is not None:
             try:
-                self._loop.run_until_complete(server_mod._client.close())
+                cls._loop.run_until_complete(server_mod._client.close())
             except Exception:
                 pass
             server_mod._client = None
-        self._daemon._shutdown_event.set()
+        cls._daemon._shutdown_event.set()
         try:
-            self._loop.run_until_complete(
-                asyncio.wait_for(self._daemon_task, timeout=10))
+            cls._loop.run_until_complete(
+                asyncio.wait_for(cls._daemon_task, timeout=10))
         except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
-        self._loop.close()
-        self._sock_patch.stop()
-        shutil.rmtree(self._daemon_dir, ignore_errors=True)
+        cls._loop.close()
+        cls._sock_patch.stop()
+        cls._data_patch.stop()
+        shutil.rmtree(cls._daemon_dir, ignore_errors=True)
+        shutil.rmtree(cls._data_dir, ignore_errors=True)
+        logging.getLogger("karellen_lsp_mcp").removeHandler(cls._log_handler)
 
     def _run(self, coro):
-        return self._loop.run_until_complete(coro)
+        return self.__class__._loop.run_until_complete(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -216,26 +222,40 @@ class ServerEndToEndTest(_ServerTestBase):
 
     @classmethod
     def setUpClass(cls):
-        super().setUpClass()
         cls._tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-e2e-")
         cls._files = _create_project(cls._tmpdir)
+        super().setUpClass()
+        # Register once and index — shared across all query tests
+        reg = cls._loop.run_until_complete(server_mod.lsp_register_project(
+            project_path=cls._tmpdir, language="cpp",
+            lsp_command=["clangd", "--background-index"],
+            build_info={"compile_commands_dir": cls._tmpdir}))
+        cls._project_id = reg.project_id
+        # Open files to trigger indexing; daemon waits for readiness automatically
+        for f in cls._files.values():
+            cls._loop.run_until_complete(
+                server_mod.lsp_document_symbols(cls._project_id, f))
 
     @classmethod
     def tearDownClass(cls):
+        try:
+            cls._loop.run_until_complete(
+                server_mod.lsp_deregister_project(cls._project_id))
+        except Exception:
+            pass
         shutil.rmtree(cls._tmpdir, ignore_errors=True)
         super().tearDownClass()
 
-    # --- Lifecycle ---
+    # --- Lifecycle (these use refcount increments, not new clangd instances) ---
 
     def test_register_returns_dataclass(self):
+        # Re-registering same project just increments refcount
         result = self._run(server_mod.lsp_register_project(
             project_path=self._tmpdir, language="cpp",
             lsp_command=["clangd", "--background-index"],
             build_info={"compile_commands_dir": self._tmpdir}))
         self.assertIsInstance(result, RegisterResult)
         self.assertTrue(len(result.project_id) > 0)
-
-        # Cleanup
         self._run(server_mod.lsp_deregister_project(result.project_id))
 
     def test_deregister_returns_string_result(self):
@@ -247,92 +267,60 @@ class ServerEndToEndTest(_ServerTestBase):
         self.assertIn(reg.project_id, result.result)
 
     def test_list_projects_returns_typed_list(self):
-        reg = self._run(server_mod.lsp_register_project(
-            project_path=self._tmpdir, language="cpp",
-            build_info={"compile_commands_dir": self._tmpdir}))
         result = self._run(server_mod.lsp_list_projects())
         self.assertIsInstance(result, list)
         self.assertGreater(len(result), 0)
         self.assertIsInstance(result[0], ProjectInfo)
-        self.assertEqual(result[0].project_id, reg.project_id)
-        self.assertEqual(result[0].language, "cpp")
+        self.assertEqual(result[0].project_id, self._project_id)
+        self.assertEqual(result[0].language, "c")
         self.assertGreaterEqual(result[0].refcount, 1)
 
-        self._run(server_mod.lsp_deregister_project(reg.project_id))
-
-    # --- Query tools return correct dataclass types ---
-
-    def _register_and_index(self):
-        reg = self._run(server_mod.lsp_register_project(
-            project_path=self._tmpdir, language="cpp",
-            lsp_command=["clangd", "--background-index"],
-            build_info={"compile_commands_dir": self._tmpdir}))
-        pid = reg.project_id
-        # Open files to trigger indexing; daemon waits for readiness automatically
-        for f in self._files.values():
-            self._run(server_mod.lsp_document_symbols(pid, f))
-        return pid
+    # --- Query tools return correct dataclass types (use shared project) ---
 
     def test_read_definition_returns_location_result(self):
-        pid = self._register_and_index()
-        # main.cpp line 5: "int sum = add(1, 2);"
+        # main.cpp line 6 (1-based): "int sum = add(1, 2);"
         result = self._run(server_mod.lsp_read_definition(
-            pid, self._files["main.cpp"], 5, 14))
+            self._project_id, self._files["main.cpp"], 6, 15))
         self.assertIsInstance(result, LocationResult)
         self.assertGreater(len(result.locations), 0)
         self.assertTrue(any("math" in loc.file for loc in result.locations))
         self.assertFalse(result.indexing)
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     def test_find_references_returns_location_result(self):
-        pid = self._register_and_index()
-        # math.cpp line 2: "int add(int a, int b) {"
+        # math.cpp line 3 (1-based): "int add(int a, int b) {"
         result = self._run(server_mod.lsp_find_references(
-            pid, self._files["math.cpp"], 2, 4))
+            self._project_id, self._files["math.cpp"], 3, 5))
         self.assertIsInstance(result, LocationResult)
         self.assertGreaterEqual(len(result.locations), 2)
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     def test_hover_returns_hover_result(self):
-        pid = self._register_and_index()
-        # main.cpp line 5: "int sum = add(1, 2);"
+        # main.cpp line 6 (1-based): "int sum = add(1, 2);"
         result = self._run(server_mod.lsp_hover(
-            pid, self._files["main.cpp"], 5, 14))
+            self._project_id, self._files["main.cpp"], 6, 15))
         self.assertIsInstance(result, HoverResult)
         self.assertIn("int", str(result.content))
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     def test_document_symbols_returns_typed_result(self):
-        pid = self._register_and_index()
         result = self._run(server_mod.lsp_document_symbols(
-            pid, self._files["main.cpp"]))
+            self._project_id, self._files["main.cpp"]))
         self.assertIsInstance(result, DocumentSymbolsResult)
         names = [s.name for s in result.symbols]
         self.assertIn("main", names)
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     def test_call_hierarchy_incoming_returns_typed_result(self):
-        pid = self._register_and_index()
-        # math.cpp line 2: "int add(int a, int b) {"
+        # math.cpp line 3 (1-based): "int add(int a, int b) {"
         result = self._run(server_mod.lsp_call_hierarchy_incoming(
-            pid, self._files["math.cpp"], 2, 4))
+            self._project_id, self._files["math.cpp"], 3, 5))
         self.assertIsInstance(result, CallHierarchyResult)
         self.assertEqual(result.direction, "incoming")
         names = [item.name for item in result.items]
         self.assertIn("main", names)
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     def test_call_hierarchy_outgoing_returns_typed_result(self):
-        pid = self._register_and_index()
-        # main.cpp line 4: "int main() {"
+        # main.cpp line 5 (1-based): "int main() {"
         try:
             result = self._run(server_mod.lsp_call_hierarchy_outgoing(
-                pid, self._files["main.cpp"], 4, 4))
+                self._project_id, self._files["main.cpp"], 5, 5))
         except Exception as e:
             if "does not support" in str(e):
                 self.skipTest(str(e))
@@ -343,50 +331,38 @@ class ServerEndToEndTest(_ServerTestBase):
         has_callees = "add" in names or "multiply" in names or "printf" in names
         self.assertTrue(has_callees, "Expected callees in: %s" % names)
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     def test_type_hierarchy_supertypes_returns_typed_result(self):
-        pid = self._register_and_index()
-        # shapes.h line 9: "class Circle : public Shape {"
+        # shapes.h line 10 (1-based): "class Circle : public Shape {"
         result = self._run(server_mod.lsp_type_hierarchy_supertypes(
-            pid, self._files["shapes.h"], 9, 6))
+            self._project_id, self._files["shapes.h"], 10, 7))
         self.assertIsInstance(result, TypeHierarchyResult)
         self.assertEqual(result.direction, "supertypes")
         names = [item.name for item in result.items]
         self.assertIn("Shape", names)
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     def test_type_hierarchy_subtypes_returns_typed_result(self):
-        pid = self._register_and_index()
-        # shapes.h line 3: "class Shape {"
+        # shapes.h line 4 (1-based): "class Shape {"
         result = self._run(server_mod.lsp_type_hierarchy_subtypes(
-            pid, self._files["shapes.h"], 3, 6))
+            self._project_id, self._files["shapes.h"], 4, 7))
         self.assertIsInstance(result, TypeHierarchyResult)
         self.assertEqual(result.direction, "subtypes")
         names = [item.name for item in result.items]
         self.assertIn("Circle", names)
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     def test_diagnostics_returns_typed_result(self):
-        pid = self._register_and_index()
         result = self._run(server_mod.lsp_diagnostics(
-            pid, self._files["math.cpp"]))
+            self._project_id, self._files["math.cpp"]))
         self.assertIsInstance(result, DiagnosticsResult)
-        # Clean file should have no errors
         errors = [d for d in result.diagnostics if d.severity == "Error"]
         self.assertEqual(len(errors), 0)
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     def test_diagnostics_on_broken_file(self):
-        pid = self._register_and_index()
         broken = os.path.join(self._tmpdir, "broken_e2e.cpp")
         with open(broken, "w") as f:
             f.write("int foo() { return undefined_var; }\n"
                     "void bar() { unknown_func(); }\n")
-        result = self._run(server_mod.lsp_diagnostics(pid, broken))
+        result = self._run(server_mod.lsp_diagnostics(
+            self._project_id, broken))
         self.assertIsInstance(result, DiagnosticsResult)
         if result.diagnostics:
             messages = " ".join(d.message.lower() for d in result.diagnostics)
@@ -394,12 +370,9 @@ class ServerEndToEndTest(_ServerTestBase):
                 "undeclared" in messages or "undefined" in messages or "error" in messages,
                 "Expected diagnostic error in: %s" % [d.message for d in result.diagnostics])
 
-        self._run(server_mod.lsp_deregister_project(pid))
-
     # --- Error handling via ToolError ---
 
     def test_invalid_project_id_raises_tool_error(self):
-        # Force connection to daemon first
         self._run(server_mod._get_client())
         with self.assertRaises(ToolError) as ctx:
             self._run(server_mod.lsp_read_definition(
@@ -407,15 +380,10 @@ class ServerEndToEndTest(_ServerTestBase):
         self.assertIn("Unknown project", str(ctx.exception))
 
     def test_relative_path_raises_tool_error(self):
-        reg = self._run(server_mod.lsp_register_project(
-            project_path=self._tmpdir, language="cpp",
-            build_info={"compile_commands_dir": self._tmpdir}))
         with self.assertRaises(ToolError) as ctx:
             self._run(server_mod.lsp_read_definition(
-                reg.project_id, "relative/path.cpp", 0, 0))
+                self._project_id, "relative/path.cpp", 0, 0))
         self.assertIn("must be absolute", str(ctx.exception))
-
-        self._run(server_mod.lsp_deregister_project(reg.project_id))
 
     # --- Concurrent _get_client (race condition test) ---
 
@@ -429,7 +397,6 @@ class ServerEndToEndTest(_ServerTestBase):
                 server_mod._get_client(),
                 server_mod._get_client(),
             )
-            # All should be the same instance
             self.assertIs(results[0], results[1])
             self.assertIs(results[1], results[2])
 
@@ -466,35 +433,34 @@ class ServerEndToEndTest(_ServerTestBase):
     # --- Error handling via ToolError ---
 
     def test_file_outside_project_raises_tool_error(self):
-        reg = self._run(server_mod.lsp_register_project(
-            project_path=self._tmpdir, language="cpp",
-            build_info={"compile_commands_dir": self._tmpdir}))
         outside = tempfile.mktemp(suffix=".cpp", dir="/tmp")
         try:
             with open(outside, "w") as f:
                 f.write("int x;")
             with self.assertRaises(ToolError) as ctx:
                 self._run(server_mod.lsp_read_definition(
-                    reg.project_id, outside, 0, 0))
+                    self._project_id, outside, 1, 1))
             self.assertIn("not under project root", str(ctx.exception))
         finally:
             if os.path.exists(outside):
                 os.unlink(outside)
 
-        self._run(server_mod.lsp_deregister_project(reg.project_id))
-
 
 class ServerMultiProjectTest(_ServerTestBase):
     """Tests for multiple registrations, refcounting, and garbage collection
-    through the MCP tool functions."""
+    through the MCP tool functions.
+
+    These tests exercise lifecycle (register/deregister/force) so they
+    manage their own clangd instances within the shared daemon.
+    """
 
     @classmethod
     def setUpClass(cls):
-        super().setUpClass()
         cls._tmpdir1 = tempfile.mkdtemp(prefix="karellen-lsp-mcp-e2e-proj1-")
         cls._tmpdir2 = tempfile.mkdtemp(prefix="karellen-lsp-mcp-e2e-proj2-")
         cls._files1 = _create_project(cls._tmpdir1)
         cls._files2 = _create_project(cls._tmpdir2)
+        super().setUpClass()
 
     @classmethod
     def tearDownClass(cls):
@@ -577,8 +543,8 @@ class ServerMultiProjectTest(_ServerTestBase):
         projects = self._run(server_mod.lsp_list_projects())
         self.assertEqual(len(projects), 0)
 
-    def test_same_project_different_languages_are_separate(self):
-        # Register same path as both "c" and "cpp" — should get different project_ids
+    def test_same_project_language_aliases_share_registration(self):
+        # c and cpp are aliases — registering as either should share one project
         reg_cpp = self._run(server_mod.lsp_register_project(
             project_path=self._tmpdir1, language="cpp",
             build_info={"compile_commands_dir": self._tmpdir1}))
@@ -586,12 +552,12 @@ class ServerMultiProjectTest(_ServerTestBase):
             project_path=self._tmpdir1, language="c",
             build_info={"compile_commands_dir": self._tmpdir1}))
 
-        self.assertNotEqual(reg_cpp.project_id, reg_c.project_id)
+        self.assertEqual(reg_cpp.project_id, reg_c.project_id)
 
         projects = self._run(server_mod.lsp_list_projects())
-        self.assertEqual(len(projects), 2)
-        langs = {p.language for p in projects}
-        self.assertEqual(langs, {"c", "cpp"})
+        langs = {p.language for p in projects
+                 if p.project_id == reg_cpp.project_id}
+        self.assertEqual(langs, {"c"})
 
         self._run(server_mod.lsp_deregister_project(reg_cpp.project_id))
         self._run(server_mod.lsp_deregister_project(reg_c.project_id))
@@ -627,10 +593,10 @@ class ServerMultiProjectTest(_ServerTestBase):
         # All query types should fail with ToolError
         with self.assertRaises(ToolError):
             self._run(server_mod.lsp_read_definition(
-                reg.project_id, self._files1["main.cpp"], 0, 0))
+                reg.project_id, self._files1["main.cpp"], 1, 1))
         with self.assertRaises(ToolError):
             self._run(server_mod.lsp_find_references(
-                reg.project_id, self._files1["main.cpp"], 0, 0))
+                reg.project_id, self._files1["main.cpp"], 1, 1))
         with self.assertRaises(ToolError):
             self._run(server_mod.lsp_hover(
                 reg.project_id, self._files1["main.cpp"], 0, 0))

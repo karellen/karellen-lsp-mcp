@@ -1,0 +1,13 @@
+{
+  "name": "karellen-lsp-mcp",
+  "version": "0.1.2",
+  "description": "LSP-backed code intelligence for Claude Code via MCP - navigate definitions, references, call hierarchies, type hierarchies, and diagnostics across codebases",
+  "author": {
+    "name": "Karellen, Inc.",
+    "email": "supervisor@karellen.co"
+  },
+  "homepage": "https://karellen.co",
+  "repository": "https://github.com/karellen/karellen-lsp-mcp",
+  "license": "Apache-2.0",
+  "keywords": ["lsp", "language-server-protocol", "mcp", "code-intelligence", "clangd", "jdtls"]
+}
