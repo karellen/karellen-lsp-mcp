@@ -16,6 +16,7 @@
 """Unit tests for ProjectRegistry."""
 
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -28,6 +29,7 @@ from karellen_lsp_mcp.project_registry import (
 )
 from karellen_lsp_mcp.lsp_adapter import (
     ClangdAdapter, JdtlsAdapter, get_adapter, get_supported_languages,
+    _is_compile_commands_stale,
 )
 
 
@@ -150,6 +152,188 @@ class ClangdAdapterTest(unittest.TestCase):
             # Verify the copy has the right content
             with open(os.path.join(managed_path, "compile_commands.json")) as f:
                 self.assertIn("main.c", f.read())
+
+
+class CompileCommandsStalenessTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="karellen-lsp-mcp-stale-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_fresh_compile_commands_not_stale(self):
+        # CMakeLists.txt exists, compile_commands.json is newer
+        cmake = os.path.join(self.tmpdir, "CMakeLists.txt")
+        with open(cmake, "w") as f:
+            f.write("cmake_minimum_required(VERSION 3.10)")
+        cc_path = os.path.join(self.tmpdir, "compile_commands.json")
+        with open(cc_path, "w") as f:
+            json.dump([{"file": cmake, "command": "cc",
+                        "directory": self.tmpdir}], f)
+        # Ensure cc is newer
+        os.utime(cmake, (1000, 1000))
+        os.utime(cc_path, (2000, 2000))
+        self.assertFalse(_is_compile_commands_stale(cc_path, self.tmpdir))
+
+    def test_stale_when_cmake_newer(self):
+        cc_path = os.path.join(self.tmpdir, "compile_commands.json")
+        with open(cc_path, "w") as f:
+            json.dump([{"file": "main.c", "command": "cc main.c",
+                        "directory": self.tmpdir}], f)
+        os.utime(cc_path, (1000, 1000))
+        # CMakeLists.txt is newer
+        cmake = os.path.join(self.tmpdir, "CMakeLists.txt")
+        with open(cmake, "w") as f:
+            f.write("cmake_minimum_required(VERSION 3.20)")
+        os.utime(cmake, (2000, 2000))
+        self.assertTrue(_is_compile_commands_stale(cc_path, self.tmpdir))
+
+    def test_stale_when_meson_build_newer(self):
+        cc_path = os.path.join(self.tmpdir, "compile_commands.json")
+        with open(cc_path, "w") as f:
+            json.dump([], f)
+        os.utime(cc_path, (1000, 1000))
+        meson = os.path.join(self.tmpdir, "meson.build")
+        with open(meson, "w") as f:
+            f.write("project('test')")
+        os.utime(meson, (2000, 2000))
+        self.assertTrue(_is_compile_commands_stale(cc_path, self.tmpdir))
+
+    def test_stale_when_source_files_missing(self):
+        cc_path = os.path.join(self.tmpdir, "compile_commands.json")
+        with open(cc_path, "w") as f:
+            json.dump([
+                {"file": "/nonexistent/a.c", "command": "cc a.c",
+                 "directory": self.tmpdir},
+                {"file": "/nonexistent/b.c", "command": "cc b.c",
+                 "directory": self.tmpdir},
+            ], f)
+        self.assertTrue(_is_compile_commands_stale(cc_path, self.tmpdir))
+
+    def test_not_stale_when_source_files_exist(self):
+        src = os.path.join(self.tmpdir, "main.c")
+        with open(src, "w") as f:
+            f.write("int main() { return 0; }")
+        cc_path = os.path.join(self.tmpdir, "compile_commands.json")
+        with open(cc_path, "w") as f:
+            json.dump([
+                {"file": src, "command": "cc main.c",
+                 "directory": self.tmpdir},
+                {"file": src, "command": "cc main.c",
+                 "directory": self.tmpdir},
+            ], f)
+        self.assertFalse(_is_compile_commands_stale(cc_path, self.tmpdir))
+
+    def test_relative_paths_resolved_against_directory(self):
+        src = os.path.join(self.tmpdir, "main.c")
+        with open(src, "w") as f:
+            f.write("int main() {}")
+        cc_path = os.path.join(self.tmpdir, "compile_commands.json")
+        with open(cc_path, "w") as f:
+            json.dump([
+                {"file": "main.c", "command": "cc main.c",
+                 "directory": self.tmpdir},
+                {"file": "gone.c", "command": "cc gone.c",
+                 "directory": self.tmpdir},
+            ], f)
+        # One of two files missing -> stale
+        self.assertTrue(_is_compile_commands_stale(cc_path, self.tmpdir))
+
+    def test_nonexistent_cc_file_not_stale(self):
+        self.assertFalse(
+            _is_compile_commands_stale("/no/such/file.json", self.tmpdir))
+
+    def test_nested_cmakelists_detected(self):
+        cc_path = os.path.join(self.tmpdir, "compile_commands.json")
+        with open(cc_path, "w") as f:
+            json.dump([], f)
+        os.utime(cc_path, (1000, 1000))
+        # Nested CMakeLists.txt is newer
+        subdir = os.path.join(self.tmpdir, "src")
+        os.makedirs(subdir)
+        cmake = os.path.join(subdir, "CMakeLists.txt")
+        with open(cmake, "w") as f:
+            f.write("add_library(foo)")
+        os.utime(cmake, (2000, 2000))
+        self.assertTrue(_is_compile_commands_stale(cc_path, self.tmpdir))
+
+
+class ClangdAdapterStalenessTest(unittest.TestCase):
+    def setUp(self):
+        self.adapter = ClangdAdapter()
+        self._data_dir = tempfile.mkdtemp(
+            prefix="karellen-lsp-mcp-test-data-")
+        self._data_patch = unittest.mock.patch(
+            "karellen_lsp_mcp.lsp_adapter._user_data_dir",
+            return_value=self._data_dir)
+        self._data_patch.start()
+
+    def tearDown(self):
+        self._data_patch.stop()
+        shutil.rmtree(self._data_dir, ignore_errors=True)
+
+    @unittest.mock.patch("subprocess.run")
+    def test_stale_compile_commands_triggers_regeneration(self, mock_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create stale compile_commands.json in build dir
+            build = os.path.join(tmpdir, "build")
+            os.makedirs(build)
+            cc_path = os.path.join(build, "compile_commands.json")
+            with open(cc_path, "w") as f:
+                json.dump([{"file": "/gone.c", "command": "cc",
+                            "directory": tmpdir}], f)
+
+            # CMakeLists.txt newer than compile_commands
+            cmake = os.path.join(tmpdir, "CMakeLists.txt")
+            with open(cmake, "w") as f:
+                f.write("project(test)")
+            os.utime(cc_path, (1000, 1000))
+            os.utime(cmake, (2000, 2000))
+
+            mock_run.return_value = unittest.mock.Mock(
+                returncode=1, stderr="error", stdout="")
+
+            # Should skip stale file and attempt cmake generation
+            self.adapter.configure(
+                tmpdir, "c",
+                detection_details={
+                    "compile_commands_dir": build,
+                    "build_system": "cmake",
+                })
+            # cmake was called (even though it fails in the mock)
+            mock_run.assert_called_once()
+
+    def test_fresh_compile_commands_used_directly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            build = os.path.join(tmpdir, "build")
+            os.makedirs(build)
+            src = os.path.join(tmpdir, "main.c")
+            with open(src, "w") as f:
+                f.write("int main() {}")
+            cc_path = os.path.join(build, "compile_commands.json")
+            with open(cc_path, "w") as f:
+                json.dump([{"file": src, "command": "cc main.c",
+                            "directory": tmpdir}], f)
+            # CMakeLists.txt older than compile_commands
+            cmake = os.path.join(tmpdir, "CMakeLists.txt")
+            with open(cmake, "w") as f:
+                f.write("project(test)")
+            os.utime(cmake, (1000, 1000))
+            os.utime(cc_path, (2000, 2000))
+
+            config = self.adapter.configure(
+                tmpdir, "c",
+                detection_details={
+                    "compile_commands_dir": build,
+                    "build_system": "cmake",
+                })
+            # Should have copied to managed dir (no cmake regeneration)
+            cc_arg = [a for a in config.command
+                      if "--compile-commands-dir" in a]
+            self.assertEqual(len(cc_arg), 1)
+            managed_path = cc_arg[0].split("=", 1)[1]
+            self.assertTrue(os.path.isfile(
+                os.path.join(managed_path, "compile_commands.json")))
 
 
 class JdtlsAdapterTest(unittest.TestCase):

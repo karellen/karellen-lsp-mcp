@@ -239,9 +239,14 @@ lsp_register_project(
   with the timeout extending automatically as long as progress is being made. No need
   to poll or sleep. Use `lsp_indexing_status(project_id)` to check progress on large
   codebases
-- **Regenerate compile_commands.json after adding C/C++ files**: it's a static snapshot
-  of compiler commands. After adding `.c`/`.cpp` files, regenerate it (re-run cmake,
-  bear, etc.) and clangd will pick up the changes automatically
+- **All positions are 1-based**: line and character offsets in both input and output
+  start at 1. Values from one tool's output (e.g. `lsp_workspace_symbols`) can be
+  fed directly into another tool's input (e.g. `lsp_read_definition`)
+- **Stale compile_commands.json is auto-detected**: if build config files
+  (`CMakeLists.txt`, `meson.build`) are newer than `compile_commands.json`, or
+  referenced source files no longer exist, the server regenerates it automatically
+  for CMake/Meson projects. For other build systems, the stale file is used with a
+  warning
 - **Deregister when done**: `lsp_deregister_project` decrements the refcount; the LSP
   server shuts down when all sessions deregister
 ````

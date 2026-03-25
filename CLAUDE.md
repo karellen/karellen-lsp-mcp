@@ -60,8 +60,13 @@ Console script: `karellen-lsp-mcp` → `karellen_lsp_mcp.server:main`
   wait for indexing with progress-driven dynamic timeout extension.
 - **Refcounting**: Multiple sessions registering the same project (path + language) share
   one LSP server instance. Server stops when refcount reaches 0.
-- **Normalizers**: Server-specific behavior (clangd progress tracking, transient error
-  classification, version-based feature support) abstracted via `LspNormalizer` subclasses.
+- **Normalizers**: Server-specific behavior abstracted via `LspNormalizer` subclasses.
+  `ClangdNormalizer` tracks clangd progress and version-based feature support.
+  `JdtlsNormalizer` tracks jdtls readiness via three conditions: ServiceReady seen,
+  Searching progress seen, and no active progress tokens — preventing premature query
+  dispatch during cold/warm index builds.
+- **Staleness detection**: `compile_commands.json` is checked for freshness (build config
+  mtime, dead source references) before use. Stale files trigger regeneration for CMake/Meson.
 - **Signal handling**: SIGTERM/SIGINT handled in both frontend and daemon. Frontend monitors
   parent PID death via background thread (2s polling) to avoid orphan processes.
 

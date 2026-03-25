@@ -48,7 +48,7 @@ mcp = FastMCP("karellen-lsp-mcp", instructions=(
     "Hierarchy: lsp_call_tree_incoming/outgoing, lsp_type_tree_supertypes/subtypes "
     "(recursive; prefer over single-level lsp_call_hierarchy_*/lsp_type_hierarchy_*). "
     "Diagnostics: lsp_diagnostics. "
-    "All line/character positions are 0-based (LSP convention)."
+    "All line/character positions are 1-based."
 ))
 
 _client = None
@@ -350,8 +350,8 @@ async def lsp_read_definition(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_read_definition", {
         "project_id": project_id, "file_path": file_path,
@@ -373,8 +373,8 @@ async def lsp_read_declaration(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_read_declaration", {
         "project_id": project_id, "file_path": file_path,
@@ -392,8 +392,8 @@ async def lsp_find_implementations(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_find_implementations", {
         "project_id": project_id, "file_path": file_path,
@@ -414,8 +414,8 @@ async def lsp_read_type_definition(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_read_type_definition", {
         "project_id": project_id, "file_path": file_path,
@@ -434,8 +434,8 @@ async def lsp_find_references(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
         include_declaration: Include the declaration in results (default True).
     """
     result = await _request("lsp_find_references", {
@@ -455,8 +455,8 @@ async def lsp_hover(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_hover", {
         "project_id": project_id, "file_path": file_path,
@@ -489,8 +489,8 @@ async def lsp_call_hierarchy_incoming(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_call_hierarchy_incoming", {
         "project_id": project_id, "file_path": file_path,
@@ -508,8 +508,8 @@ async def lsp_call_hierarchy_outgoing(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_call_hierarchy_outgoing", {
         "project_id": project_id, "file_path": file_path,
@@ -527,8 +527,8 @@ async def lsp_type_hierarchy_supertypes(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_type_hierarchy_supertypes", {
         "project_id": project_id, "file_path": file_path,
@@ -546,8 +546,8 @@ async def lsp_type_hierarchy_subtypes(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
     """
     result = await _request("lsp_type_hierarchy_subtypes", {
         "project_id": project_id, "file_path": file_path,
@@ -570,8 +570,8 @@ async def lsp_call_tree_incoming(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
         max_depth: Maximum depth of returned tree (default 3). Nodes at the
                    boundary have has_more=true if deeper levels exist.
                    Increase to explore further.
@@ -598,8 +598,8 @@ async def lsp_call_tree_outgoing(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
         max_depth: Maximum depth of returned tree (default 3). Nodes at the
                    boundary have has_more=true if deeper levels exist.
                    Increase to explore further.
@@ -626,8 +626,8 @@ async def lsp_type_tree_supertypes(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
         max_depth: Maximum depth of returned tree (default 3). Nodes at the
                    boundary have has_more=true if deeper levels exist.
                    Increase to explore further.
@@ -654,8 +654,8 @@ async def lsp_type_tree_subtypes(project_id: str, file_path: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
-        line: 0-based line number.
-        character: 0-based character offset.
+        line: 1-based line number.
+        character: 1-based character offset.
         max_depth: Maximum depth of returned tree (default 3). Nodes at the
                    boundary have has_more=true if deeper levels exist.
                    Increase to explore further.

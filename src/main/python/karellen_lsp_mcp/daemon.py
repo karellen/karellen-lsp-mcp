@@ -299,8 +299,8 @@ class _FrontendSession:
                       "lsp_type_tree_supertypes", "lsp_type_tree_subtypes"):
             file_uri = registry.validate_file_path(project_id, params["file_path"])
             await client.ensure_file_open(file_uri)
-            line = params["line"]
-            character = params["character"]
+            line = params["line"] - 1
+            character = params["character"] - 1
 
             if method == "lsp_read_definition":
                 result = await client.definition(file_uri, line, character)

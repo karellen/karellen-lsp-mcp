@@ -50,21 +50,33 @@ user data dir determined by [platformdirs](https://pypi.org/project/platformdirs
 
 ### Resolution order
 
-1. **Explicit** `build_info.compile_commands_dir` — copy to managed dir
-2. **Detected** `details.compile_commands_dir` — copy to managed dir
-3. **Generate for CMake**: re-run `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
-   in the existing build dir (preserves all other settings), then copy
-   the result to managed dir. If no existing build dir, creates an
-   out-of-tree build under the managed dir itself.
+1. **Explicit** `build_info.compile_commands_dir` — check freshness, copy to managed dir
+2. **Detected** `details.compile_commands_dir` — check freshness, copy to managed dir
+3. **Generate for CMake**: run `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
+   in an out-of-tree build under the managed dir.
 4. **Generate for Meson**: run `meson setup` with build dir under managed dir
+
+If a candidate `compile_commands.json` is **stale**, it is skipped and generation
+is attempted instead (for CMake/Meson projects). If the build system does not
+support generation, the stale file is used with a warning.
+
+### Staleness detection
+
+A `compile_commands.json` is considered stale if either condition holds:
+
+- **Build config newer**: any `CMakeLists.txt` or `meson.build` in the project
+  tree has a modification time newer than the `compile_commands.json`
+- **Dead source references**: any source file referenced in the compilation
+  database no longer exists on disk
+
+All referenced files are checked (not sampled), which takes ~10-20ms even for
+large projects (10K+ entries) due to OS dentry caching.
 
 ### CMake generation details
 
-- If an existing configured build dir is found (CMakeCache.txt), cmake is
-  re-run there with just `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` added.
-  This preserves all existing configuration (compiler, flags, options).
 - If no existing build dir, `cmake -S <project> -B <managed>/cmake-build`
   creates a fresh out-of-tree build under the managed directory.
+- The project tree is never modified.
 - Timeout: 120 seconds.
 
 ## Additional Config Detection

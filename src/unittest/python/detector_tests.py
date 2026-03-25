@@ -983,6 +983,7 @@ class CppDetectorTest(unittest.TestCase):
             self.assertEqual(result[0].build_system, "cmake")
             self.assertEqual(result[0].confidence, "high")
             self.assertEqual(result[0].build_info["compile_commands_dir"], build)
+            self.assertEqual(result[0].details["build_system"], "cmake")
 
     def test_cmake_project_without_compile_commands(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1021,6 +1022,7 @@ class CppDetectorTest(unittest.TestCase):
             result = self.detector.detect(d, [])
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0].build_system, "meson")
+            self.assertEqual(result[0].details["build_system"], "meson")
 
     def test_autotools_project(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1029,6 +1031,7 @@ class CppDetectorTest(unittest.TestCase):
             result = self.detector.detect(d, [])
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0].build_system, "autotools")
+            self.assertEqual(result[0].details["build_system"], "autotools")
 
     def test_compile_flags_txt_detected(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1061,3 +1064,4 @@ class CppDetectorTest(unittest.TestCase):
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0].build_system, "unknown")
             self.assertEqual(result[0].confidence, "high")
+            self.assertEqual(result[0].details["build_system"], "unknown")

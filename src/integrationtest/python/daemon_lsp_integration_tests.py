@@ -376,7 +376,7 @@ class DaemonLspIntegrationTest(unittest.TestCase):
         projects = self._request("list_projects", {})
         self.assertEqual(len(projects), 1)
         self.assertEqual(projects[0]["project_id"], self._project_id)
-        self.assertEqual(projects[0]["language"], "cpp")
+        self.assertEqual(projects[0]["language"], "c")
         self.assertEqual(projects[0]["refcount"], 1)
         self.assertIn(projects[0]["status"], ("indexing", "ready"))
 
@@ -438,12 +438,12 @@ class DaemonLspIntegrationTest(unittest.TestCase):
     # --- Definition ---
 
     def test_definition_of_add_from_main(self):
-        # main.cpp line 5: "int sum = add(10, 20);"
+        # main.cpp line 6 (1-based): "int sum = add(10, 20);"
         result = self._request("lsp_read_definition", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 5,
-            "character": 14,
+            "line": 6,
+            "character": 15,
         })
         self.assertGreater(len(result["locations"]), 0)
         files = [loc["file"] for loc in result["locations"]]
@@ -451,12 +451,12 @@ class DaemonLspIntegrationTest(unittest.TestCase):
                         "Expected math_utils in: %s" % files)
 
     def test_definition_of_circle_constructor(self):
-        # main.cpp line 16: "Circle c(5.0);"
+        # main.cpp line 17 (1-based): "Circle c(5.0);"
         result = self._request("lsp_read_definition", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 16,
-            "character": 4,
+            "line": 17,
+            "character": 5,
         })
         self.assertGreater(len(result["locations"]), 0)
         files = [loc["file"] for loc in result["locations"]]
@@ -464,12 +464,12 @@ class DaemonLspIntegrationTest(unittest.TestCase):
                         "Expected shapes in: %s" % files)
 
     def test_definition_of_dot_product(self):
-        # main.cpp line 13: "double dp = dot_product(v1, v2);"
+        # main.cpp line 14 (1-based): "double dp = dot_product(v1, v2);"
         result = self._request("lsp_read_definition", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 13,
-            "character": 16,
+            "line": 14,
+            "character": 17,
         })
         self.assertGreater(len(result["locations"]), 0)
         files = [loc["file"] for loc in result["locations"]]
@@ -484,20 +484,20 @@ class DaemonLspIntegrationTest(unittest.TestCase):
         result = self._request("lsp_find_references", {
             "project_id": self._project_id,
             "file_path": self._files["math_utils.cpp"],
-            "line": 2,
-            "character": 4,
+            "line": 3,
+            "character": 5,
         })
         self.assertGreaterEqual(len(result["locations"]), 2)
 
     def test_find_references_of_area(self):
         # area() is declared in Shape, overridden in Circle and Rectangle,
         # called in print_shape_info
-        # shapes.h line 6: "virtual double area() const = 0;"
+        # shapes.h line 7 (1-based): "virtual double area() const = 0;"
         result = self._request("lsp_find_references", {
             "project_id": self._project_id,
             "file_path": self._files["shapes.h"],
-            "line": 6,
-            "character": 19,
+            "line": 7,
+            "character": 20,
         })
         # Declaration + overrides + call site
         self.assertGreaterEqual(len(result["locations"]), 2)
@@ -505,34 +505,34 @@ class DaemonLspIntegrationTest(unittest.TestCase):
     # --- Hover ---
 
     def test_hover_on_add(self):
-        # main.cpp line 5: "int sum = add(10, 20);"
+        # main.cpp line 6 (1-based): "int sum = add(10, 20);"
         result = self._request("lsp_hover", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 5,
-            "character": 14,
+            "line": 6,
+            "character": 15,
         })
         self.assertIsNotNone(result.get("content"))
         # Check full result dict contains "int" somewhere
         self.assertIn("int", str(result))
 
     def test_hover_on_vector2d(self):
-        # main.cpp line 11: "    Vector2D v1 = {1.0, 2.0};"
+        # main.cpp line 12 (1-based): "    Vector2D v1 = {1.0, 2.0};"
         result = self._request("lsp_hover", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 11,
-            "character": 4,
+            "line": 12,
+            "character": 5,
         })
         self.assertIn("Vector2D", str(result))
 
     def test_hover_on_circle(self):
-        # main.cpp line 16: "Circle c(5.0);"
+        # main.cpp line 17 (1-based): "Circle c(5.0);"
         result = self._request("lsp_hover", {
             "project_id": self._project_id,
             "file_path": self._files["main.cpp"],
-            "line": 16,
-            "character": 4,
+            "line": 17,
+            "character": 5,
         })
         self.assertIn("Circle", str(result))
 
@@ -543,8 +543,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
         result = self._request("lsp_call_hierarchy_incoming", {
             "project_id": self._project_id,
             "file_path": self._files["math_utils.cpp"],
-            "line": 2,
-            "character": 4,
+            "line": 3,
+            "character": 5,
         })
         self.assertEqual(result["direction"], "incoming")
         names = [item["name"] for item in result["items"]]
@@ -556,8 +556,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             result = self._request("lsp_call_hierarchy_outgoing", {
                 "project_id": self._project_id,
                 "file_path": self._files["math_utils.cpp"],
-                "line": 10,
-                "character": 4,
+                "line": 11,
+                "character": 5,
             })
         except RuntimeError as e:
             if "does not support" in str(e):
@@ -574,8 +574,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             result = self._request("lsp_call_hierarchy_outgoing", {
                 "project_id": self._project_id,
                 "file_path": self._files["main.cpp"],
-                "line": 4,
-                "character": 4,
+                "line": 5,
+                "character": 5,
             })
         except RuntimeError as e:
             if "does not support" in str(e):
@@ -589,12 +589,12 @@ class DaemonLspIntegrationTest(unittest.TestCase):
 
     def test_type_hierarchy_supertypes_of_circle(self):
         # Circle inherits from Shape
-        # shapes.h line 10: "class Circle : public Shape {"
+        # shapes.h line 11 (1-based): "class Circle : public Shape {"
         result = self._request("lsp_type_hierarchy_supertypes", {
             "project_id": self._project_id,
             "file_path": self._files["shapes.h"],
-            "line": 10,
-            "character": 6,
+            "line": 11,
+            "character": 7,
         })
         self.assertEqual(result["direction"], "supertypes")
         names = [item["name"] for item in result["items"]]
@@ -602,24 +602,24 @@ class DaemonLspIntegrationTest(unittest.TestCase):
 
     def test_type_hierarchy_supertypes_of_rectangle(self):
         # Rectangle inherits from Shape
-        # shapes.h line 20: "class Rectangle : public Shape {"
+        # shapes.h line 21 (1-based): "class Rectangle : public Shape {"
         result = self._request("lsp_type_hierarchy_supertypes", {
             "project_id": self._project_id,
             "file_path": self._files["shapes.h"],
-            "line": 20,
-            "character": 6,
+            "line": 21,
+            "character": 7,
         })
         names = [item["name"] for item in result["items"]]
         self.assertIn("Shape", names)
 
     def test_type_hierarchy_subtypes_of_shape(self):
         # Shape has subtypes Circle and Rectangle
-        # shapes.h line 3: "class Shape {"
+        # shapes.h line 4 (1-based): "class Shape {"
         result = self._request("lsp_type_hierarchy_subtypes", {
             "project_id": self._project_id,
             "file_path": self._files["shapes.h"],
-            "line": 3,
-            "character": 6,
+            "line": 4,
+            "character": 7,
         })
         names = [item["name"] for item in result["items"]]
         has_subtypes = "Circle" in names or "Rectangle" in names
@@ -659,8 +659,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             self._request("lsp_read_definition", {
                 "project_id": self._project_id,
                 "file_path": "relative/path.cpp",
-                "line": 0,
-                "character": 0,
+                "line": 1,
+                "character": 1,
             })
         self.assertIn("must be absolute", str(ctx.exception))
 
@@ -673,8 +673,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
                 self._request("lsp_read_definition", {
                     "project_id": self._project_id,
                     "file_path": outside,
-                    "line": 0,
-                    "character": 0,
+                    "line": 1,
+                    "character": 1,
                 })
             self.assertIn("not under project root", str(ctx.exception))
         finally:
@@ -686,8 +686,8 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             self._request("lsp_read_definition", {
                 "project_id": "nonexistent1234",
                 "file_path": self._files["main.cpp"],
-                "line": 0,
-                "character": 0,
+                "line": 1,
+                "character": 1,
             })
         self.assertIn("Unknown project", str(ctx.exception))
 

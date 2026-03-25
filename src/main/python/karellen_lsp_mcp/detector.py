@@ -869,6 +869,8 @@ class CppDetector(ProjectDetector):
 
         details = {}
 
+        details["build_system"] = build_system or "unknown"
+
         # compile_commands.json location
         if compile_commands_dir:
             details["compile_commands_dir"] = compile_commands_dir

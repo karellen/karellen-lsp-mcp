@@ -103,6 +103,98 @@ def _path_to_uri(path):
 
 
 # ---------------------------------------------------------------------------
+# Compile commands staleness detection
+# ---------------------------------------------------------------------------
+
+# Build config files whose modification invalidates compile_commands.json
+_BUILD_CONFIG_GLOBS = (
+    "CMakeLists.txt",
+    "meson.build",
+    "meson_options.txt",
+)
+
+
+def _newest_mtime_under(project_path, filenames):
+    """Return the newest mtime of any file matching filenames in the tree.
+
+    Walks the project tree looking for files with the given basenames.
+    Returns 0.0 if none are found.
+    """
+    newest = 0.0
+    for dirpath, dirnames, files in os.walk(project_path):
+        # Skip hidden dirs and common non-source dirs
+        dirnames[:] = [d for d in dirnames
+                       if not d.startswith(".")
+                       and d not in ("node_modules", "__pycache__",
+                                     ".git", "target")]
+        for name in filenames:
+            if name in files:
+                path = os.path.join(dirpath, name)
+                try:
+                    mt = os.path.getmtime(path)
+                    if mt > newest:
+                        newest = mt
+                except OSError:
+                    pass
+    return newest
+
+
+def _is_compile_commands_stale(cc_path, project_path):
+    """Check if compile_commands.json is stale.
+
+    Stale if:
+    1. Any build config file (CMakeLists.txt, meson.build) in the project
+       tree is newer than compile_commands.json, OR
+    2. A sample of source files referenced in compile_commands.json no
+       longer exist.
+
+    Returns True if stale, False if fresh or if staleness cannot be
+    determined (e.g., file unreadable).
+    """
+    try:
+        cc_mtime = os.path.getmtime(cc_path)
+    except OSError:
+        return False
+
+    # Check 1: build config files newer than compile_commands.json
+    config_mtime = _newest_mtime_under(project_path,
+                                       _BUILD_CONFIG_GLOBS)
+    if config_mtime > cc_mtime:
+        logger.info("compile_commands.json (%s) is older than build config "
+                    "files in %s", cc_path, project_path)
+        return True
+
+    # Check 2: all source files for dead references
+    try:
+        import json
+        with open(cc_path, "r") as f:
+            entries = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+    if not isinstance(entries, list) or not entries:
+        return False
+
+    missing = 0
+    for entry in entries:
+        src = entry.get("file", "")
+        if not src:
+            continue
+        if not os.path.isabs(src):
+            directory = entry.get("directory", project_path)
+            src = os.path.join(directory, src)
+        if not os.path.exists(src):
+            missing += 1
+
+    if missing > 0:
+        logger.info("compile_commands.json (%s) references %d/%d missing "
+                    "source files", cc_path, missing, len(entries))
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Clangd Adapter
 # ---------------------------------------------------------------------------
 
@@ -157,28 +249,48 @@ class ClangdAdapter(LspAdapter):
 
         Never pollutes the project tree. Copies existing compile_commands.json
         to a managed dir, or generates one via cmake/meson and copies it.
+        If an existing compile_commands.json is stale (older than build config
+        files or referencing missing source files), regenerates instead of
+        copying for CMake/Meson projects.
         Returns the managed directory path, or None.
         """
         managed = _project_managed_dir(project_path, "clangd")
+        build_system = details.get("build_system")
+        can_regenerate = build_system in ("cmake", "meson")
 
-        # 1. Explicit from build_info — copy to managed dir
+        # Collect candidate compile_commands.json sources
+        candidates = []
+
+        # 1. Explicit from build_info
         source_dir = build_info.get("compile_commands_dir")
         if source_dir:
-            return self._copy_to_managed(source_dir, managed)
+            candidates.append(source_dir)
 
-        if build_info.get("build_dir"):
+        if not candidates and build_info.get("build_dir"):
             cc_path = os.path.join(build_info["build_dir"],
                                    "compile_commands.json")
             if os.path.exists(cc_path):
-                return self._copy_to_managed(build_info["build_dir"], managed)
+                candidates.append(build_info["build_dir"])
 
-        # 2. From detection — copy to managed dir
-        if details.get("compile_commands_dir"):
-            return self._copy_to_managed(details["compile_commands_dir"],
-                                         managed)
+        # 2. From detection
+        if not candidates and details.get("compile_commands_dir"):
+            candidates.append(details["compile_commands_dir"])
+
+        # Try each candidate — if stale and we can regenerate, skip it
+        for candidate in candidates:
+            cc_path = os.path.join(candidate, "compile_commands.json")
+            if not os.path.isfile(cc_path):
+                continue
+            if can_regenerate and _is_compile_commands_stale(
+                    cc_path, project_path):
+                logger.info("Stale compile_commands.json in %s, "
+                            "will regenerate", candidate)
+                continue
+            logger.info("Fresh compile_commands.json in %s, copying",
+                        candidate)
+            return self._copy_to_managed(candidate, managed)
 
         # 3. Generate for CMake projects
-        build_system = details.get("build_system")
         if build_system == "cmake":
             return self._generate_cmake_compile_commands(
                 project_path, details, managed)
@@ -187,6 +299,14 @@ class ClangdAdapter(LspAdapter):
         if build_system == "meson":
             return self._generate_meson_compile_commands(
                 project_path, managed)
+
+        # 5. Stale candidates are better than nothing when we can't regenerate
+        for candidate in candidates:
+            result = self._copy_to_managed(candidate, managed)
+            if result:
+                logger.warning("Using stale compile_commands.json from %s "
+                               "(no build system to regenerate)", candidate)
+                return result
 
         return None
 
@@ -205,18 +325,23 @@ class ClangdAdapter(LspAdapter):
                                          managed_dir):
         """Generate compile_commands.json for a CMake project.
 
-        First checks if any existing build dir already has compile_commands.json
-        and copies it to the managed dir. Otherwise, creates an out-of-tree
-        build under the managed dir — never modifies the project tree.
+        First checks if any existing build dir already has a fresh
+        compile_commands.json and copies it. Otherwise, creates an
+        out-of-tree build under the managed dir — never modifies the
+        project tree.
         """
         import subprocess
 
         cmake_build_dirs = details.get("cmake_build_dirs", [])
 
-        # Check if an existing build dir already has compile_commands
+        # Check if an existing build dir has a fresh compile_commands
         for build_dir in cmake_build_dirs:
             cc_path = os.path.join(build_dir, "compile_commands.json")
             if os.path.exists(cc_path):
+                if _is_compile_commands_stale(cc_path, project_path):
+                    logger.info("Stale compile_commands.json in %s, "
+                                "skipping", build_dir)
+                    continue
                 return self._copy_to_managed(build_dir, managed_dir)
 
         # Create out-of-tree build under managed dir

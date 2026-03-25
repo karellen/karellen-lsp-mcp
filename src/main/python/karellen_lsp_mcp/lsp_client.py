@@ -604,6 +604,10 @@ class LspClient:
             # Server request (e.g., window/showMessage, workspace/configuration)
             # Respond with null for unsupported requests
             await self._respond_to_server_request(msg["id"], msg["method"], msg.get("params"))
+            # Also forward to normalizer — some servers (jdtls) send
+            # status updates as requests rather than notifications
+            if self._normalizer:
+                self._normalizer.on_notification(msg["method"], msg.get("params"))
 
     async def _respond_to_server_request(self, msg_id, method, params):
         """Respond to server-initiated requests with sensible defaults."""

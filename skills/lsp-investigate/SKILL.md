@@ -155,5 +155,5 @@ lsp_deregister_project(project_id="<id>")
   finds actual references, not string matches.
 - **Check indexing status on large codebases.** Cross-file queries wait for indexing
   automatically, but `lsp_indexing_status` shows progress.
-- **All positions are 0-based** (LSP convention).
+- **All positions are 1-based.**
 - **Always deregister when done** to release resources.

@@ -272,31 +272,31 @@ class ServerEndToEndTest(_ServerTestBase):
         self.assertGreater(len(result), 0)
         self.assertIsInstance(result[0], ProjectInfo)
         self.assertEqual(result[0].project_id, self._project_id)
-        self.assertEqual(result[0].language, "cpp")
+        self.assertEqual(result[0].language, "c")
         self.assertGreaterEqual(result[0].refcount, 1)
 
     # --- Query tools return correct dataclass types (use shared project) ---
 
     def test_read_definition_returns_location_result(self):
-        # main.cpp line 5: "int sum = add(1, 2);"
+        # main.cpp line 6 (1-based): "int sum = add(1, 2);"
         result = self._run(server_mod.lsp_read_definition(
-            self._project_id, self._files["main.cpp"], 5, 14))
+            self._project_id, self._files["main.cpp"], 6, 15))
         self.assertIsInstance(result, LocationResult)
         self.assertGreater(len(result.locations), 0)
         self.assertTrue(any("math" in loc.file for loc in result.locations))
         self.assertFalse(result.indexing)
 
     def test_find_references_returns_location_result(self):
-        # math.cpp line 2: "int add(int a, int b) {"
+        # math.cpp line 3 (1-based): "int add(int a, int b) {"
         result = self._run(server_mod.lsp_find_references(
-            self._project_id, self._files["math.cpp"], 2, 4))
+            self._project_id, self._files["math.cpp"], 3, 5))
         self.assertIsInstance(result, LocationResult)
         self.assertGreaterEqual(len(result.locations), 2)
 
     def test_hover_returns_hover_result(self):
-        # main.cpp line 5: "int sum = add(1, 2);"
+        # main.cpp line 6 (1-based): "int sum = add(1, 2);"
         result = self._run(server_mod.lsp_hover(
-            self._project_id, self._files["main.cpp"], 5, 14))
+            self._project_id, self._files["main.cpp"], 6, 15))
         self.assertIsInstance(result, HoverResult)
         self.assertIn("int", str(result.content))
 
@@ -308,19 +308,19 @@ class ServerEndToEndTest(_ServerTestBase):
         self.assertIn("main", names)
 
     def test_call_hierarchy_incoming_returns_typed_result(self):
-        # math.cpp line 2: "int add(int a, int b) {"
+        # math.cpp line 3 (1-based): "int add(int a, int b) {"
         result = self._run(server_mod.lsp_call_hierarchy_incoming(
-            self._project_id, self._files["math.cpp"], 2, 4))
+            self._project_id, self._files["math.cpp"], 3, 5))
         self.assertIsInstance(result, CallHierarchyResult)
         self.assertEqual(result.direction, "incoming")
         names = [item.name for item in result.items]
         self.assertIn("main", names)
 
     def test_call_hierarchy_outgoing_returns_typed_result(self):
-        # main.cpp line 4: "int main() {"
+        # main.cpp line 5 (1-based): "int main() {"
         try:
             result = self._run(server_mod.lsp_call_hierarchy_outgoing(
-                self._project_id, self._files["main.cpp"], 4, 4))
+                self._project_id, self._files["main.cpp"], 5, 5))
         except Exception as e:
             if "does not support" in str(e):
                 self.skipTest(str(e))
@@ -332,18 +332,18 @@ class ServerEndToEndTest(_ServerTestBase):
         self.assertTrue(has_callees, "Expected callees in: %s" % names)
 
     def test_type_hierarchy_supertypes_returns_typed_result(self):
-        # shapes.h line 9: "class Circle : public Shape {"
+        # shapes.h line 10 (1-based): "class Circle : public Shape {"
         result = self._run(server_mod.lsp_type_hierarchy_supertypes(
-            self._project_id, self._files["shapes.h"], 9, 6))
+            self._project_id, self._files["shapes.h"], 10, 7))
         self.assertIsInstance(result, TypeHierarchyResult)
         self.assertEqual(result.direction, "supertypes")
         names = [item.name for item in result.items]
         self.assertIn("Shape", names)
 
     def test_type_hierarchy_subtypes_returns_typed_result(self):
-        # shapes.h line 3: "class Shape {"
+        # shapes.h line 4 (1-based): "class Shape {"
         result = self._run(server_mod.lsp_type_hierarchy_subtypes(
-            self._project_id, self._files["shapes.h"], 3, 6))
+            self._project_id, self._files["shapes.h"], 4, 7))
         self.assertIsInstance(result, TypeHierarchyResult)
         self.assertEqual(result.direction, "subtypes")
         names = [item.name for item in result.items]
@@ -439,7 +439,7 @@ class ServerEndToEndTest(_ServerTestBase):
                 f.write("int x;")
             with self.assertRaises(ToolError) as ctx:
                 self._run(server_mod.lsp_read_definition(
-                    self._project_id, outside, 0, 0))
+                    self._project_id, outside, 1, 1))
             self.assertIn("not under project root", str(ctx.exception))
         finally:
             if os.path.exists(outside):
@@ -543,8 +543,8 @@ class ServerMultiProjectTest(_ServerTestBase):
         projects = self._run(server_mod.lsp_list_projects())
         self.assertEqual(len(projects), 0)
 
-    def test_same_project_different_languages_are_separate(self):
-        # Register same path as both "c" and "cpp" — should get different project_ids
+    def test_same_project_language_aliases_share_registration(self):
+        # c and cpp are aliases — registering as either should share one project
         reg_cpp = self._run(server_mod.lsp_register_project(
             project_path=self._tmpdir1, language="cpp",
             build_info={"compile_commands_dir": self._tmpdir1}))
@@ -552,12 +552,12 @@ class ServerMultiProjectTest(_ServerTestBase):
             project_path=self._tmpdir1, language="c",
             build_info={"compile_commands_dir": self._tmpdir1}))
 
-        self.assertNotEqual(reg_cpp.project_id, reg_c.project_id)
+        self.assertEqual(reg_cpp.project_id, reg_c.project_id)
 
         projects = self._run(server_mod.lsp_list_projects())
-        self.assertEqual(len(projects), 2)
-        langs = {p.language for p in projects}
-        self.assertEqual(langs, {"c", "cpp"})
+        langs = {p.language for p in projects
+                 if p.project_id == reg_cpp.project_id}
+        self.assertEqual(langs, {"c"})
 
         self._run(server_mod.lsp_deregister_project(reg_cpp.project_id))
         self._run(server_mod.lsp_deregister_project(reg_c.project_id))
@@ -593,10 +593,10 @@ class ServerMultiProjectTest(_ServerTestBase):
         # All query types should fail with ToolError
         with self.assertRaises(ToolError):
             self._run(server_mod.lsp_read_definition(
-                reg.project_id, self._files1["main.cpp"], 0, 0))
+                reg.project_id, self._files1["main.cpp"], 1, 1))
         with self.assertRaises(ToolError):
             self._run(server_mod.lsp_find_references(
-                reg.project_id, self._files1["main.cpp"], 0, 0))
+                reg.project_id, self._files1["main.cpp"], 1, 1))
         with self.assertRaises(ToolError):
             self._run(server_mod.lsp_hover(
                 reg.project_id, self._files1["main.cpp"], 0, 0))

@@ -264,37 +264,37 @@ class JdtlsIntegrationTest(unittest.TestCase):
         self.assertIn("Greeter", names)
 
     def test_05_hover(self):
-        # Greeter.java line 6 (0-based): "public Greeter(String name) {"
+        # Greeter.java line 6 (1-based): "public Greeter(String name) {"
         result = self._request("lsp_hover", {
             "project_id": self._project_id,
             "file_path": self._files["Greeter.java"],
-            "line": 5,
-            "character": 11,
+            "line": 6,
+            "character": 12,
         })
         # Should return type info about the constructor
         self.assertTrue(result.get("parts") or result.get("content"))
 
     def test_06_read_definition(self):
-        # Main.java line 4 (0-based): "Greeter greeter = new Greeter("World");"
-        # Cursor on "Greeter" at character 8
+        # Main.java line 5 (1-based): "Greeter greeter = new Greeter("World");"
+        # Cursor on "Greeter" at character 9
         result = self._request("lsp_read_definition", {
             "project_id": self._project_id,
             "file_path": self._files["Main.java"],
-            "line": 4,
-            "character": 8,
+            "line": 5,
+            "character": 9,
         })
         locations = result.get("locations", [])
         self.assertGreater(len(locations), 0)
         self.assertTrue(any("Greeter" in loc["file"] for loc in locations))
 
     def test_07_find_references(self):
-        # Greeter.java line 2 (0-based): "public class Greeter {"
-        # Cursor on "Greeter" at character 13
+        # Greeter.java line 3 (1-based): "public class Greeter {"
+        # Cursor on "Greeter" at character 14
         result = self._request("lsp_find_references", {
             "project_id": self._project_id,
             "file_path": self._files["Greeter.java"],
-            "line": 2,
-            "character": 13,
+            "line": 3,
+            "character": 14,
         })
         locations = result.get("locations", [])
         # Should find at least the declaration and usage in Main.java

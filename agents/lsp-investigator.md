@@ -67,5 +67,7 @@ by using LSP tools for structured navigation instead of reading files line by li
   warnings, which is more reliable than parsing build output.
 - **Cross-file queries include indexing status.** If `indexing: true` appears in results,
   the index is still being built and results may be incomplete. Wait or re-query later.
+- **All positions are 1-based.** Line and character offsets in both input and output
+  start at 1. Values from one tool's output can be fed directly into another tool's input.
 - **Always deregister when done** to release resources. The LSP server stops when the
   refcount reaches 0.

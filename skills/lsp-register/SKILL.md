@@ -147,6 +147,6 @@ This decrements the refcount. The LSP server stops when all sessions deregister.
   LSP server instance (refcounted).
 - **Use `force=True` to restart.** If the LSP server gets into a bad state, re-register
   with `force=True` to kill and restart it.
-- **All positions are 0-based.** Line and character offsets follow LSP convention.
+- **All positions are 1-based.** Line and character offsets start at 1.
 - **Cross-file queries include indexing status.** Check the `indexing` field in results;
   if `true`, results may be incomplete.

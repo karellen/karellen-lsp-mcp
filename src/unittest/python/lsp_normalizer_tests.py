@@ -13,13 +13,14 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""Unit tests for LspNormalizer and ClangdNormalizer."""
+"""Unit tests for LspNormalizer, ClangdNormalizer, and JdtlsNormalizer."""
 
 import unittest
 
 from karellen_lsp_mcp.lsp_client import LspClientError
 from karellen_lsp_mcp.lsp_normalizer import (
-    ServerState, LspNormalizer, ClangdNormalizer, create_normalizer,
+    ServerState, LspNormalizer, ClangdNormalizer, JdtlsNormalizer,
+    create_normalizer,
 )
 
 
@@ -44,6 +45,18 @@ class CreateNormalizerTest(unittest.TestCase):
     def test_none_command(self):
         normalizer = create_normalizer(None)
         self.assertIsInstance(normalizer, LspNormalizer)
+
+    def test_jdtls_command(self):
+        normalizer = create_normalizer(["jdtls"])
+        self.assertIsInstance(normalizer, JdtlsNormalizer)
+
+    def test_jdtls_with_path(self):
+        normalizer = create_normalizer(["/home/user/.local/bin/jdtls", "-data", "/tmp/ws"])
+        self.assertIsInstance(normalizer, JdtlsNormalizer)
+
+    def test_jdtls_warmup_minimum_300s(self):
+        normalizer = create_normalizer(["jdtls"], warmup_timeout=30)
+        self.assertGreaterEqual(normalizer.warmup_timeout, 300)
 
 
 class LspNormalizerBaseTest(unittest.TestCase):
@@ -382,6 +395,221 @@ class LspNormalizerBaseFeatureSupportTest(unittest.TestCase):
         n = LspNormalizer()
         n.on_server_info({"name": "test-server", "version": "1.2.3"})
         self.assertEqual(n.server_version, "1.2.3")
+
+
+class JdtlsNormalizerStateTest(unittest.TestCase):
+    def test_initial_state(self):
+        n = JdtlsNormalizer()
+        self.assertEqual(n.state, ServerState.STARTING)
+
+    def test_on_started_transitions_to_indexing(self):
+        n = JdtlsNormalizer()
+        n.on_started()
+        self.assertEqual(n.state, ServerState.INDEXING)
+
+    def test_on_stopped(self):
+        n = JdtlsNormalizer()
+        n.on_started()
+        n.on_stopped()
+        self.assertEqual(n.state, ServerState.STOPPED)
+
+
+class JdtlsNormalizerProgressTest(unittest.TestCase):
+    def setUp(self):
+        self.n = JdtlsNormalizer()
+        self.n.on_started()
+        self.ready_called = False
+        self.n.set_ready_callback(lambda: setattr(self, "ready_called", True))
+
+    def test_progress_end_without_service_ready_not_ready(self):
+        self.n.on_notification("$/progress", {
+            "token": "search-1",
+            "value": {"kind": "begin", "title": "Searching"},
+        })
+        self.n.on_notification("$/progress", {
+            "token": "search-1",
+            "value": {"kind": "end"},
+        })
+        self.assertEqual(self.n.state, ServerState.INDEXING)
+
+    def test_service_ready_without_searching_not_ready(self):
+        self.n.on_notification("language/status", {
+            "type": "ServiceReady", "message": "Ready"})
+        self.assertEqual(self.n.state, ServerState.INDEXING)
+
+    def test_service_ready_and_non_searching_progress_not_ready(self):
+        self.n.on_notification("language/status", {
+            "type": "ServiceReady", "message": "Ready"})
+        self.n.on_notification("$/progress", {
+            "token": "build-1",
+            "value": {"kind": "begin", "title": "Building"},
+        })
+        self.n.on_notification("$/progress", {
+            "token": "build-1",
+            "value": {"kind": "end"},
+        })
+        self.assertEqual(self.n.state, ServerState.INDEXING)
+
+    def test_full_cold_start_sequence(self):
+        # Import
+        self.n.on_notification("$/progress", {
+            "token": "import-1",
+            "value": {"kind": "begin", "title": "Initialize Workspace"},
+        })
+        self.n.on_notification("$/progress", {
+            "token": "import-1",
+            "value": {"kind": "end"},
+        })
+
+        # ServiceReady (after import, before Building/Searching)
+        self.n.on_notification("language/status", {
+            "type": "ServiceReady", "message": "ServiceReady"})
+        self.assertEqual(self.n.state, ServerState.INDEXING)
+
+        # Building — ServiceReady seen but no Searching yet
+        self.n.on_notification("$/progress", {
+            "token": "build-1",
+            "value": {"kind": "begin", "title": "Building"},
+        })
+        self.n.on_notification("$/progress", {
+            "token": "build-1",
+            "value": {"kind": "end"},
+        })
+        self.assertEqual(self.n.state, ServerState.INDEXING)
+
+        # Searching — all three conditions met on end
+        self.n.on_notification("$/progress", {
+            "token": "search-1",
+            "value": {"kind": "begin", "title": "Searching"},
+        })
+        self.assertEqual(self.n.state, ServerState.INDEXING)
+        self.n.on_notification("$/progress", {
+            "token": "search-1",
+            "value": {"kind": "end"},
+        })
+        self.assertEqual(self.n.state, ServerState.READY)
+        self.assertTrue(self.ready_called)
+
+    def test_warm_start_sequence(self):
+        # ServiceReady
+        self.n.on_notification("language/status", {
+            "type": "ServiceReady", "message": "ServiceReady"})
+
+        # Instant Building
+        self.n.on_notification("$/progress", {
+            "token": "build-1",
+            "value": {"kind": "begin", "title": "Building"},
+        })
+        self.n.on_notification("$/progress", {
+            "token": "build-1",
+            "value": {"kind": "end"},
+        })
+        self.assertEqual(self.n.state, ServerState.INDEXING)
+
+        # Short Searching (3s on warm)
+        self.n.on_notification("$/progress", {
+            "token": "search-1",
+            "value": {"kind": "begin", "title": "Searching"},
+        })
+        self.n.on_notification("$/progress", {
+            "token": "search-1",
+            "value": {"kind": "end"},
+        })
+        self.assertEqual(self.n.state, ServerState.READY)
+        self.assertTrue(self.ready_called)
+
+    def test_non_service_ready_status_ignored(self):
+        self.n.on_notification("language/status", {
+            "type": "Started", "message": "Starting"})
+        self.assertEqual(self.n.state, ServerState.INDEXING)
+
+    def test_progress_report_updates_percentage(self):
+        self.n.on_notification("$/progress", {
+            "token": "import-1",
+            "value": {"kind": "begin", "title": "Importing",
+                      "percentage": 0},
+        })
+        self.n.on_notification("$/progress", {
+            "token": "import-1",
+            "value": {"kind": "report", "percentage": 50},
+        })
+        status = self.n.get_indexing_status()
+        self.assertEqual(status["active_tasks"][0]["percentage"], 50)
+
+    def test_no_progress_timeout_does_not_mark_ready(self):
+        self.n.on_no_progress_timeout()
+        self.assertEqual(self.n.state, ServerState.INDEXING)
+
+    def test_warmup_timeout_forces_ready_without_service_ready(self):
+        self.n.on_warmup_timeout()
+        self.assertEqual(self.n.state, ServerState.READY)
+
+    def test_warmup_timeout_ignored_after_ready(self):
+        self.n.on_notification("language/status", {
+            "type": "ServiceReady", "message": "Ready"})
+        self.n.on_notification("$/progress", {
+            "token": "s1", "value": {"kind": "begin", "title": "Searching"}})
+        self.n.on_notification("$/progress", {
+            "token": "s1", "value": {"kind": "end"}})
+        self.assertEqual(self.n.state, ServerState.READY)
+        self.n.on_warmup_timeout()
+
+    def test_indexing_status_tracks_tasks(self):
+        self.n.on_notification("$/progress", {
+            "token": "import-1",
+            "value": {"kind": "begin", "title": "Importing Gradle project",
+                      "message": "subproject :app"},
+        })
+        status = self.n.get_indexing_status()
+        self.assertEqual(status["state"], "indexing")
+        self.assertEqual(len(status["active_tasks"]), 1)
+        self.assertEqual(status["active_tasks"][0]["title"],
+                         "Importing Gradle project")
+        self.assertEqual(status["active_tasks"][0]["message"],
+                         "subproject :app")
+
+        self.n.on_notification("$/progress", {
+            "token": "import-1",
+            "value": {"kind": "end"},
+        })
+        status = self.n.get_indexing_status()
+        self.assertEqual(status["completed_tasks"], 1)
+
+
+class JdtlsNormalizerTransientErrorTest(unittest.TestCase):
+    def test_not_yet_ready_is_transient(self):
+        n = JdtlsNormalizer()
+        self.assertTrue(n.is_transient_error("Server not yet ready"))
+
+    def test_service_not_ready_is_transient(self):
+        n = JdtlsNormalizer()
+        self.assertTrue(n.is_transient_error("Service is not ready"))
+
+    def test_random_error_not_transient(self):
+        n = JdtlsNormalizer()
+        self.assertFalse(n.is_transient_error("NullPointerException"))
+
+
+class JdtlsNormalizerRetryPolicyTest(unittest.TestCase):
+    def test_max_retries_during_indexing(self):
+        n = JdtlsNormalizer()
+        n.on_started()
+        self.assertEqual(n.max_retries, 10)
+
+    def test_max_retries_when_ready(self):
+        n = JdtlsNormalizer()
+        n.on_started()
+        n.on_notification("language/status", {
+            "type": "ServiceReady", "message": "Ready"})
+        n.on_notification("$/progress", {
+            "token": "s1", "value": {"kind": "begin", "title": "Searching"}})
+        n.on_notification("$/progress", {
+            "token": "s1", "value": {"kind": "end"}})
+        self.assertEqual(n.max_retries, 1)
+
+    def test_retry_delay(self):
+        n = JdtlsNormalizer()
+        self.assertEqual(n.retry_delay, 2.0)
 
 
 if __name__ == "__main__":

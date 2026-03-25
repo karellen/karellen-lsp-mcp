@@ -117,6 +117,30 @@ Each field in `details` includes `_source` and `_tier` suffixed keys
 for provenance tracking (e.g., `bytecode_target_source: "compiler.xml"`,
 `bytecode_target_tier: 2`).
 
+## jdtls Indexing and Readiness
+
+jdtls has a multi-phase startup: import (Gradle/Maven sync), build, search
+(indexing), then ongoing validation and diagnostics. The `JdtlsNormalizer`
+tracks this lifecycle and marks the server ready only when all three
+conditions are met:
+
+1. **ServiceReady** — `language/status` notification with `"ServiceReady"` received
+2. **Searching seen** — a `"Searching"` progress task has begun (indicates indexing started)
+3. **No active progress tokens** — all progress tasks have completed
+
+This prevents premature query dispatch. On a cold start (no cached index),
+the full cycle typically takes 3–6 minutes for large projects. On warm start
+(cached index), readiness is reached in seconds.
+
+Single-file queries (definition, hover, document symbols) wait only for LSP
+initialization, not full indexing. Cross-file queries (references, call/type
+hierarchy, diagnostics) wait for the normalizer to report readiness, with
+the timeout extending automatically as long as progress is being made.
+
+The default warmup timeout for jdtls is 300 seconds (5 minutes). For very
+large monorepos, increase `LSP_MCP_READY_TIMEOUT` in the MCP server
+environment.
+
 ## Detection Output
 
 ```python

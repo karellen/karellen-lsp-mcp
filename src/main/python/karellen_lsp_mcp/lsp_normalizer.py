@@ -401,9 +401,192 @@ class ClangdNormalizer(LspNormalizer):
                 self._ready_callback()
 
 
+class JdtlsNormalizer(LspNormalizer):
+    """Normalizer for Eclipse jdtls-specific behavior.
+
+    jdtls needs time after startup to import the project (Gradle/Maven)
+    and build the workspace. During this warmup:
+
+    - jdtls reports import/build progress via $/progress notifications
+    - jdtls sends language/status with "ServiceReady" when fully ready
+    - Queries before readiness may timeout or return empty results
+
+    This normalizer:
+    - Requires three conditions for readiness:
+      1. language/status ServiceReady received
+      2. A "Searching..." progress task has been seen
+      3. No active progress tokens remain
+    - Tracks $/progress notifications for status reporting
+    - Classifies jdtls-specific transient errors for retry
+    """
+
+    _TRANSIENT_ERROR_FRAGMENTS = (
+        "not yet ready",
+        "server is not ready",
+        "service is not ready",
+        "still loading",
+    )
+
+    def __init__(self, warmup_timeout=300, max_retries=10, retry_delay=2.0):
+        super().__init__()
+        self._warmup_timeout = warmup_timeout
+        self._max_retries = max_retries
+        self._retry_delay = retry_delay
+        self._start_time = None
+        self._active_progress_tokens = set()
+        self._saw_service_ready = False
+        self._saw_searching = False
+        self._progress = {}
+        self._completed_progress = []
+
+    def on_started(self):
+        self._start_time = time.monotonic()
+        self._state = ServerState.INDEXING
+
+    def on_stopped(self):
+        self._state = ServerState.STOPPED
+
+    def on_notification(self, method, params):
+        if method == "$/progress" and params:
+            self._handle_progress(params)
+        elif method == "language/status" and params:
+            msg_type = params.get("type", "")
+            message = params.get("message", "")
+            logger.info("jdtls status: type=%s message=%s",
+                        msg_type, message)
+            if msg_type == "ServiceReady":
+                self._saw_service_ready = True
+
+    def _handle_progress(self, params):
+        token = params.get("token")
+        value = params.get("value", {})
+        kind = value.get("kind", "")
+
+        if kind == "begin":
+            self._active_progress_tokens.add(token)
+            title = value.get("title", "")
+            message = value.get("message", "")
+            if "Searching" in title:
+                self._saw_searching = True
+            self._progress[token] = {
+                "title": title,
+                "message": message,
+                "percentage": value.get("percentage"),
+            }
+            logger.info("jdtls progress begin [%s]: %s %s",
+                        token, title, message)
+        elif kind == "report":
+            if token in self._progress:
+                if value.get("message") is not None:
+                    self._progress[token]["message"] = value["message"]
+                if value.get("percentage") is not None:
+                    self._progress[token]["percentage"] = value["percentage"]
+            msg_parts = []
+            if value.get("message"):
+                msg_parts.append(value["message"])
+            if value.get("percentage") is not None:
+                msg_parts.append("%d%%" % value["percentage"])
+            logger.debug("jdtls progress [%s]: %s",
+                         token, " ".join(msg_parts))
+        elif kind == "end":
+            self._active_progress_tokens.discard(token)
+            entry = self._progress.pop(token, None)
+            if entry:
+                self._completed_progress.append({
+                    "title": entry["title"],
+                    "message": value.get("message", ""),
+                })
+            logger.info("jdtls progress end [%s]: %s",
+                        token, value.get("message", ""))
+            if (self._saw_service_ready
+                    and self._saw_searching
+                    and not self._active_progress_tokens):
+                self._mark_ready()
+
+    def on_no_progress_timeout(self):
+        pass  # Only progress drain marks jdtls as ready
+
+    def on_warmup_timeout(self):
+        if self._state == ServerState.INDEXING:
+            elapsed = time.monotonic() - self._start_time
+            logger.warning("jdtls not ready after %ds "
+                           "(ServiceReady=%s, Searching=%s, "
+                           "active=%d), forcing READY",
+                           int(elapsed),
+                           self._saw_service_ready,
+                           self._saw_searching,
+                           len(self._active_progress_tokens))
+            self._mark_ready()
+
+    @property
+    def warmup_timeout(self):
+        return self._warmup_timeout
+
+    def get_indexing_status(self):
+        elapsed = (time.monotonic() - self._start_time
+                   if self._start_time else 0)
+        active = []
+        for token in self._active_progress_tokens:
+            entry = self._progress.get(token, {})
+            item = {"title": entry.get("title", "")}
+            if entry.get("message"):
+                item["message"] = entry["message"]
+            if entry.get("percentage") is not None:
+                item["percentage"] = entry["percentage"]
+            active.append(item)
+        return {
+            "state": self._state.value,
+            "elapsed_seconds": round(elapsed, 1),
+            "active_tasks": active,
+            "completed_tasks": len(self._completed_progress),
+        }
+
+    def estimated_remaining_seconds(self):
+        pct = self._best_percentage()
+        if pct is None or pct <= 0 or self._start_time is None:
+            return None
+        elapsed = time.monotonic() - self._start_time
+        estimated_total = elapsed / (pct / 100.0)
+        return max(0.0, estimated_total - elapsed)
+
+    def _best_percentage(self):
+        best = None
+        for token in self._active_progress_tokens:
+            entry = self._progress.get(token, {})
+            pct = entry.get("percentage")
+            if pct is not None and (best is None or pct > best):
+                best = pct
+        return best
+
+    def is_transient_error(self, error_msg):
+        lower = error_msg.lower()
+        return any(frag in lower
+                   for frag in self._TRANSIENT_ERROR_FRAGMENTS)
+
+    @property
+    def max_retries(self):
+        if self._state == ServerState.INDEXING:
+            return self._max_retries
+        return 1
+
+    @property
+    def retry_delay(self):
+        return self._retry_delay
+
+    def _mark_ready(self):
+        if self._state == ServerState.INDEXING:
+            elapsed = time.monotonic() - self._start_time
+            logger.info("jdtls ready after %.1fs", elapsed)
+            self._state = ServerState.READY
+            if self._ready_callback:
+                self._ready_callback()
+
+
 def create_normalizer(command, warmup_timeout=60):
     """Factory: pick the right normalizer based on the LSP server command."""
     if command and command[0].endswith("clangd"):
         return ClangdNormalizer(warmup_timeout=warmup_timeout)
+    if command and command[0].endswith("jdtls"):
+        return JdtlsNormalizer(warmup_timeout=max(warmup_timeout, 300))
     # Default: no quirks
     return LspNormalizer()
