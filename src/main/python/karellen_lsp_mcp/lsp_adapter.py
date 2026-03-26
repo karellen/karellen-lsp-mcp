@@ -175,7 +175,6 @@ def _is_compile_commands_stale(cc_path, project_path):
     if not isinstance(entries, list) or not entries:
         return False
 
-    missing = 0
     for entry in entries:
         src = entry.get("file", "")
         if not src:
@@ -184,12 +183,9 @@ def _is_compile_commands_stale(cc_path, project_path):
             directory = entry.get("directory", project_path)
             src = os.path.join(directory, src)
         if not os.path.exists(src):
-            missing += 1
-
-    if missing > 0:
-        logger.info("compile_commands.json (%s) references %d/%d missing "
-                    "source files", cc_path, missing, len(entries))
-        return True
+            logger.info("compile_commands.json (%s) references missing "
+                        "source file: %s", cc_path, src)
+            return True
 
     return False
 
