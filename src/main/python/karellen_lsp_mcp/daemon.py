@@ -578,7 +578,7 @@ def _parse_hover(result):
 
 def _parse_symbol(sym):
     kind_num = sym.get("kind", 0)
-    kind = _SYMBOL_KIND_NAMES.get(kind_num, "Unknown(%d)" % kind_num)
+    kind = _SYMBOL_KIND_NAMES.get(kind_num, "")
     rng = (sym.get("selectionRange") or sym.get("range")
            or sym.get("location", {}).get("range", {}))
     start = rng.get("start", {})
