@@ -908,6 +908,51 @@ async def _walk_type_tree(client, node, lsp_item, direction,
         ))
 
 
+def _extract_call_children(calls, direction):
+    """Yield (raw_item, call_sites) from call hierarchy results."""
+    for call in calls:
+        raw_item = (call.get("from") if direction == "incoming"
+                    else call.get("to"))
+        if raw_item is None:
+            continue
+        from_ranges = call.get("fromRanges", [])
+        yield raw_item, len(from_ranges) if from_ranges else 1
+
+
+def _extract_type_children(items, direction):
+    """Yield (raw_item, None) from type hierarchy results."""
+    for item in items:
+        yield item, None
+
+
+_TREE_METHOD_CONFIG = {
+    "lsp_call_tree_incoming": {
+        "direction": "incoming",
+        "prepare": "prepare_call_hierarchy",
+        "query": "incoming_calls",
+        "extract": _extract_call_children,
+    },
+    "lsp_call_tree_outgoing": {
+        "direction": "outgoing",
+        "prepare": "prepare_call_hierarchy",
+        "query": "outgoing_calls",
+        "extract": _extract_call_children,
+    },
+    "lsp_type_tree_supertypes": {
+        "direction": "supertypes",
+        "prepare": "prepare_type_hierarchy",
+        "query": "supertypes",
+        "extract": _extract_type_children,
+    },
+    "lsp_type_tree_subtypes": {
+        "direction": "subtypes",
+        "prepare": "prepare_type_hierarchy",
+        "query": "subtypes",
+        "extract": _extract_type_children,
+    },
+}
+
+
 def _parse_workspace_symbols(result, indexing=False):
     """Parse workspace/symbol results into structured dicts."""
     symbols = []
