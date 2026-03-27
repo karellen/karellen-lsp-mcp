@@ -275,27 +275,28 @@ class _FrontendSession:
                 "This LSP server does not support %s "
                 "(requires a newer version)" % method)
 
+        ready_timeout = params.get("timeout", self.daemon.ready_timeout)
+
         if method in self._SINGLE_FILE_METHODS:
             # Single-file queries work from the AST built on didOpen —
             # only need the server to finish the initialize handshake,
             # not background indexing.
             if client.state == ServerState.STARTING:
                 initialized = await client.wait_initialized(
-                    timeout=self.daemon.ready_timeout)
+                    timeout=ready_timeout)
                 if not initialized:
                     raise LspClientError(
                         "LSP server not initialized after %ds (state: %s)"
-                        % (self.daemon.ready_timeout, client.state_name))
+                        % (ready_timeout, client.state_name))
         else:
             # Cross-file queries need the background index.
             # Use estimated remaining time for a dynamic timeout.
             if client.state != ServerState.READY:
                 est = client.estimated_remaining_seconds()
                 if est is not None:
-                    timeout = max(self.daemon.ready_timeout,
-                                  est + 30)
+                    timeout = max(ready_timeout, est + 30)
                 else:
-                    timeout = self.daemon.ready_timeout
+                    timeout = ready_timeout
                 ready = await client.wait_ready(timeout=timeout)
                 if not ready:
                     status = client.get_indexing_status()

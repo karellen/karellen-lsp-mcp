@@ -48,7 +48,10 @@ mcp = FastMCP("karellen-lsp-mcp", instructions=(
     "Hierarchy: lsp_call_tree_incoming/outgoing, lsp_type_tree_supertypes/subtypes "
     "(recursive; prefer over single-level lsp_call_hierarchy_*/lsp_type_hierarchy_*). "
     "Diagnostics: lsp_diagnostics. "
-    "All line/character positions are 1-based."
+    "Index management: lsp_regenerate_index to force-rebuild from scratch. "
+    "All line/character positions are 1-based. "
+    "All tools accept an optional timeout parameter (seconds) to override the default "
+    "readiness timeout — use higher values for large codebases."
 ))
 
 _client = None
@@ -209,7 +212,8 @@ def _to_diagnostics_result(data):
 
 @mcp.tool()
 @_tag_errors
-async def lsp_scan_languages(project_path: str) -> ScanResult:
+async def lsp_scan_languages(project_path: str,
+                             timeout: int = 30) -> ScanResult:
     """Scan a project directory for source file types and recommend LSP registrations.
 
     A lightweight alternative to lsp_detect_project — simply counts file extensions
@@ -219,8 +223,11 @@ async def lsp_scan_languages(project_path: str) -> ScanResult:
 
     Args:
         project_path: Absolute path to the project root directory.
+        timeout: Maximum seconds to wait for LSP server readiness (default 30).
     """
-    result = await _request("scan_languages", {"project_path": project_path})
+    result = await _request("scan_languages",
+                            {"project_path": project_path,
+                             "timeout": timeout})
     languages = [ScannedLanguageInfo(
         language=lang["language"],
         label=lang["label"],
@@ -237,7 +244,8 @@ async def lsp_scan_languages(project_path: str) -> ScanResult:
 
 @mcp.tool()
 @_tag_errors
-async def lsp_detect_project(project_path: str) -> DetectResult:
+async def lsp_detect_project(project_path: str,
+                             timeout: int = 30) -> DetectResult:
     """Detect languages and build systems in a project without registering.
 
     Scans the project directory for build system markers (build.gradle, pom.xml, etc.)
@@ -247,8 +255,11 @@ async def lsp_detect_project(project_path: str) -> DetectResult:
 
     Args:
         project_path: Absolute path to the project root directory.
+        timeout: Maximum seconds to wait for LSP server readiness (default 30).
     """
-    result = await _request("detect_project", {"project_path": project_path})
+    result = await _request("detect_project",
+                            {"project_path": project_path,
+                             "timeout": timeout})
     languages = [DetectedLanguageInfo(
         language=lang["language"],
         build_system=lang.get("build_system"),
@@ -266,7 +277,8 @@ async def lsp_detect_project(project_path: str) -> DetectResult:
 async def lsp_register_project(project_path: str, language: str = None,
                                lsp_command: list[str] = None,
                                build_info: dict = None,
-                               force: bool = False) -> RegisterResult:
+                               force: bool = False,
+                               timeout: int = 120) -> RegisterResult:
     """Register a project for LSP analysis. Returns a project_id for subsequent queries.
 
     Multiple sessions sharing the same project_path + language get the same LSP server instance.
@@ -280,6 +292,7 @@ async def lsp_register_project(project_path: str, language: str = None,
         build_info: Optional build configuration dict. For C/C++:
                     compile_commands_dir, build_dir, compiler_flags.
         force: If true, kill any existing LSP server for this project and start fresh.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("register_project", {
         "project_path": project_path,
@@ -287,13 +300,15 @@ async def lsp_register_project(project_path: str, language: str = None,
         "lsp_command": lsp_command,
         "build_info": build_info,
         "force": force,
+        "timeout": timeout,
     })
     return RegisterResult(project_id=result["project_id"])
 
 
 @mcp.tool()
 @_tag_errors
-async def lsp_regenerate_index(project_id: str) -> RegisterResult:
+async def lsp_regenerate_index(project_id: str,
+                               timeout: int = 120) -> RegisterResult:
     """Regenerate the project index from scratch.
 
     Cleans all managed data (compilation databases, workspace caches) and
@@ -305,28 +320,40 @@ async def lsp_regenerate_index(project_id: str) -> RegisterResult:
 
     Args:
         project_id: Project identifier from lsp_register_project.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
-    result = await _request("regenerate_index", {"project_id": project_id})
+    result = await _request("regenerate_index",
+                            {"project_id": project_id,
+                             "timeout": timeout})
     return RegisterResult(project_id=result["project_id"])
 
 
 @mcp.tool()
 @_tag_errors
-async def lsp_deregister_project(project_id: str) -> StringResult:
+async def lsp_deregister_project(project_id: str,
+                                 timeout: int = 30) -> StringResult:
     """Deregister a project. Decrements refcount; stops LSP server when it reaches 0.
 
     Args:
         project_id: The project_id returned by lsp_register_project.
+        timeout: Maximum seconds to wait for LSP server readiness (default 30).
     """
-    await _request("deregister_project", {"project_id": project_id})
+    await _request("deregister_project",
+                   {"project_id": project_id,
+                    "timeout": timeout})
     return StringResult(result="Project %s deregistered." % project_id)
 
 
 @mcp.tool()
 @_tag_errors
-async def lsp_list_projects() -> list[ProjectInfo]:
-    """List all registered projects with their status and refcounts."""
-    projects = await _request("list_projects")
+async def lsp_list_projects(timeout: int = 30) -> list[ProjectInfo]:
+    """List all registered projects with their status and refcounts.
+
+    Args:
+        timeout: Maximum seconds to wait for LSP server readiness (default 30).
+    """
+    projects = await _request("list_projects",
+                              {"timeout": timeout})
     return [ProjectInfo(project_id=p["project_id"], path=p["path"],
                         language=p["language"], refcount=p["refcount"],
                         status=p["status"])
@@ -335,7 +362,8 @@ async def lsp_list_projects() -> list[ProjectInfo]:
 
 @mcp.tool()
 @_tag_errors
-async def lsp_indexing_status(project_id: str) -> IndexingStatusResult:
+async def lsp_indexing_status(project_id: str,
+                              timeout: int = 30) -> IndexingStatusResult:
     """Query the LSP server's indexing progress for a project.
 
     Returns the current state (starting, indexing, ready, stopped), elapsed time,
@@ -345,8 +373,11 @@ async def lsp_indexing_status(project_id: str) -> IndexingStatusResult:
 
     Args:
         project_id: Project identifier from lsp_register_project.
+        timeout: Maximum seconds to wait for LSP server readiness (default 30).
     """
-    result = await _request("indexing_status", {"project_id": project_id})
+    result = await _request("indexing_status",
+                            {"project_id": project_id,
+                             "timeout": timeout})
     active = [IndexingTask(title=t["title"], message=t.get("message"),
                            percentage=t.get("percentage"))
               for t in result.get("active_tasks", [])]
@@ -363,7 +394,8 @@ async def lsp_indexing_status(project_id: str) -> IndexingStatusResult:
 @mcp.tool()
 @_tag_errors
 async def lsp_read_definition(project_id: str, file_path: str,
-                              line: int, character: int) -> LocationResult:
+                              line: int, character: int,
+                              timeout: int = 120) -> LocationResult:
     """Go to definition of the symbol at the given position.
 
     Args:
@@ -371,10 +403,12 @@ async def lsp_read_definition(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 1-based line number.
         character: 1-based character offset.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_read_definition", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
+        "timeout": timeout,
     })
     return _to_location_result(result)
 
@@ -382,7 +416,8 @@ async def lsp_read_definition(project_id: str, file_path: str,
 @mcp.tool()
 @_tag_errors
 async def lsp_read_declaration(project_id: str, file_path: str,
-                               line: int, character: int) -> LocationResult:
+                               line: int, character: int,
+                               timeout: int = 120) -> LocationResult:
     """Go to declaration of the symbol at the given position.
 
     In C/C++, this navigates to the header declaration (vs definition in
@@ -394,10 +429,12 @@ async def lsp_read_declaration(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 1-based line number.
         character: 1-based character offset.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_read_declaration", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
+        "timeout": timeout,
     })
     return _to_location_result(result)
 
@@ -405,7 +442,8 @@ async def lsp_read_declaration(project_id: str, file_path: str,
 @mcp.tool()
 @_tag_errors
 async def lsp_find_implementations(project_id: str, file_path: str,
-                                   line: int, character: int) -> LocationResult:
+                                   line: int, character: int,
+                                   timeout: int = 120) -> LocationResult:
     """Find all implementations of an interface or abstract method/class.
 
     Args:
@@ -413,10 +451,12 @@ async def lsp_find_implementations(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 1-based line number.
         character: 1-based character offset.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_find_implementations", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
+        "timeout": timeout,
     })
     return _to_location_result(result)
 
@@ -424,7 +464,8 @@ async def lsp_find_implementations(project_id: str, file_path: str,
 @mcp.tool()
 @_tag_errors
 async def lsp_read_type_definition(project_id: str, file_path: str,
-                                   line: int, character: int) -> LocationResult:
+                                   line: int, character: int,
+                                   timeout: int = 120) -> LocationResult:
     """Go to the type definition of the symbol at the given position.
 
     Navigates from a variable or expression to the definition of its type.
@@ -435,10 +476,12 @@ async def lsp_read_type_definition(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 1-based line number.
         character: 1-based character offset.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_read_type_definition", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
+        "timeout": timeout,
     })
     return _to_location_result(result)
 
@@ -447,7 +490,8 @@ async def lsp_read_type_definition(project_id: str, file_path: str,
 @_tag_errors
 async def lsp_find_references(project_id: str, file_path: str,
                               line: int, character: int,
-                              include_declaration: bool = True) -> LocationResult:
+                              include_declaration: bool = True,
+                              timeout: int = 120) -> LocationResult:
     """Find all references to the symbol at the given position.
 
     Args:
@@ -456,11 +500,13 @@ async def lsp_find_references(project_id: str, file_path: str,
         line: 1-based line number.
         character: 1-based character offset.
         include_declaration: Include the declaration in results (default True).
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_find_references", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
         "include_declaration": include_declaration,
+        "timeout": timeout,
     })
     return _to_location_result(result)
 
@@ -468,7 +514,8 @@ async def lsp_find_references(project_id: str, file_path: str,
 @mcp.tool()
 @_tag_errors
 async def lsp_hover(project_id: str, file_path: str,
-                    line: int, character: int) -> HoverResult:
+                    line: int, character: int,
+                    timeout: int = 120) -> HoverResult:
     """Get hover information (type, documentation) for the symbol at the given position.
 
     Args:
@@ -476,25 +523,30 @@ async def lsp_hover(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 1-based line number.
         character: 1-based character offset.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_hover", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
+        "timeout": timeout,
     })
     return _to_hover_result(result)
 
 
 @mcp.tool()
 @_tag_errors
-async def lsp_document_symbols(project_id: str, file_path: str) -> DocumentSymbolsResult:
+async def lsp_document_symbols(project_id: str, file_path: str,
+                               timeout: int = 120) -> DocumentSymbolsResult:
     """List all symbols (functions, classes, variables, etc.) in a file.
 
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_document_symbols", {
         "project_id": project_id, "file_path": file_path,
+        "timeout": timeout,
     })
     return _to_document_symbols_result(result)
 
@@ -502,7 +554,8 @@ async def lsp_document_symbols(project_id: str, file_path: str) -> DocumentSymbo
 @mcp.tool()
 @_tag_errors
 async def lsp_call_hierarchy_incoming(project_id: str, file_path: str,
-                                      line: int, character: int) -> CallHierarchyResult:
+                                      line: int, character: int,
+                                      timeout: int = 120) -> CallHierarchyResult:
     """Find all callers of the function/method at the given position.
 
     Args:
@@ -510,10 +563,12 @@ async def lsp_call_hierarchy_incoming(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 1-based line number.
         character: 1-based character offset.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_call_hierarchy_incoming", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
+        "timeout": timeout,
     })
     return _to_call_hierarchy_result(result)
 
@@ -521,7 +576,8 @@ async def lsp_call_hierarchy_incoming(project_id: str, file_path: str,
 @mcp.tool()
 @_tag_errors
 async def lsp_call_hierarchy_outgoing(project_id: str, file_path: str,
-                                      line: int, character: int) -> CallHierarchyResult:
+                                      line: int, character: int,
+                                      timeout: int = 120) -> CallHierarchyResult:
     """Find all functions/methods called by the function at the given position.
 
     Args:
@@ -529,10 +585,12 @@ async def lsp_call_hierarchy_outgoing(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 1-based line number.
         character: 1-based character offset.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_call_hierarchy_outgoing", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
+        "timeout": timeout,
     })
     return _to_call_hierarchy_result(result)
 
@@ -540,7 +598,8 @@ async def lsp_call_hierarchy_outgoing(project_id: str, file_path: str,
 @mcp.tool()
 @_tag_errors
 async def lsp_type_hierarchy_supertypes(project_id: str, file_path: str,
-                                        line: int, character: int) -> TypeHierarchyResult:
+                                        line: int, character: int,
+                                        timeout: int = 120) -> TypeHierarchyResult:
     """Find supertypes (base classes/interfaces) of the type at the given position.
 
     Args:
@@ -548,10 +607,12 @@ async def lsp_type_hierarchy_supertypes(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 1-based line number.
         character: 1-based character offset.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_type_hierarchy_supertypes", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
+        "timeout": timeout,
     })
     return _to_type_hierarchy_result(result)
 
@@ -559,7 +620,8 @@ async def lsp_type_hierarchy_supertypes(project_id: str, file_path: str,
 @mcp.tool()
 @_tag_errors
 async def lsp_type_hierarchy_subtypes(project_id: str, file_path: str,
-                                      line: int, character: int) -> TypeHierarchyResult:
+                                      line: int, character: int,
+                                      timeout: int = 120) -> TypeHierarchyResult:
     """Find subtypes (derived classes/implementations) of the type at the given position.
 
     Args:
@@ -567,10 +629,12 @@ async def lsp_type_hierarchy_subtypes(project_id: str, file_path: str,
         file_path: Absolute path to the source file.
         line: 1-based line number.
         character: 1-based character offset.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_type_hierarchy_subtypes", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
+        "timeout": timeout,
     })
     return _to_type_hierarchy_result(result)
 
@@ -579,7 +643,8 @@ async def lsp_type_hierarchy_subtypes(project_id: str, file_path: str,
 @_tag_errors
 async def lsp_call_tree_incoming(project_id: str, file_path: str,
                                  line: int, character: int,
-                                 max_depth: int = 3) -> CallTreeResult:
+                                 max_depth: int = 3,
+                                 timeout: int = 120) -> CallTreeResult:
     """Recursively find all callers of the function/method, returning a full tree.
 
     Walks the incoming call hierarchy up to max_depth levels, with cycle detection.
@@ -594,11 +659,13 @@ async def lsp_call_tree_incoming(project_id: str, file_path: str,
         max_depth: Maximum depth of returned tree (default 3). Nodes at the
                    boundary have has_more=true if deeper levels exist.
                    Increase to explore further.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_call_tree_incoming", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
         "max_depth": max_depth,
+        "timeout": timeout,
     })
     return _to_call_tree_result(result)
 
@@ -607,7 +674,8 @@ async def lsp_call_tree_incoming(project_id: str, file_path: str,
 @_tag_errors
 async def lsp_call_tree_outgoing(project_id: str, file_path: str,
                                  line: int, character: int,
-                                 max_depth: int = 3) -> CallTreeResult:
+                                 max_depth: int = 3,
+                                 timeout: int = 120) -> CallTreeResult:
     """Recursively find all functions called by the function, returning a full tree.
 
     Walks the outgoing call hierarchy up to max_depth levels, with cycle detection.
@@ -622,11 +690,13 @@ async def lsp_call_tree_outgoing(project_id: str, file_path: str,
         max_depth: Maximum depth of returned tree (default 3). Nodes at the
                    boundary have has_more=true if deeper levels exist.
                    Increase to explore further.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_call_tree_outgoing", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
         "max_depth": max_depth,
+        "timeout": timeout,
     })
     return _to_call_tree_result(result)
 
@@ -635,7 +705,8 @@ async def lsp_call_tree_outgoing(project_id: str, file_path: str,
 @_tag_errors
 async def lsp_type_tree_supertypes(project_id: str, file_path: str,
                                    line: int, character: int,
-                                   max_depth: int = 3) -> TypeTreeResult:
+                                   max_depth: int = 3,
+                                   timeout: int = 120) -> TypeTreeResult:
     """Recursively find all supertypes (base classes/interfaces), returning a full tree.
 
     Walks the type hierarchy upward up to max_depth levels, with cycle detection.
@@ -650,11 +721,13 @@ async def lsp_type_tree_supertypes(project_id: str, file_path: str,
         max_depth: Maximum depth of returned tree (default 3). Nodes at the
                    boundary have has_more=true if deeper levels exist.
                    Increase to explore further.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_type_tree_supertypes", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
         "max_depth": max_depth,
+        "timeout": timeout,
     })
     return _to_type_tree_result(result)
 
@@ -663,7 +736,8 @@ async def lsp_type_tree_supertypes(project_id: str, file_path: str,
 @_tag_errors
 async def lsp_type_tree_subtypes(project_id: str, file_path: str,
                                  line: int, character: int,
-                                 max_depth: int = 3) -> TypeTreeResult:
+                                 max_depth: int = 3,
+                                 timeout: int = 120) -> TypeTreeResult:
     """Recursively find all subtypes (derived classes/implementations), returning a full tree.
 
     Walks the type hierarchy downward up to max_depth levels, with cycle detection.
@@ -678,34 +752,39 @@ async def lsp_type_tree_subtypes(project_id: str, file_path: str,
         max_depth: Maximum depth of returned tree (default 3). Nodes at the
                    boundary have has_more=true if deeper levels exist.
                    Increase to explore further.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_type_tree_subtypes", {
         "project_id": project_id, "file_path": file_path,
         "line": line, "character": character,
         "max_depth": max_depth,
+        "timeout": timeout,
     })
     return _to_type_tree_result(result)
 
 
 @mcp.tool()
 @_tag_errors
-async def lsp_diagnostics(project_id: str, file_path: str) -> DiagnosticsResult:
+async def lsp_diagnostics(project_id: str, file_path: str,
+                          timeout: int = 120) -> DiagnosticsResult:
     """Get compiler diagnostics (errors, warnings) for a file.
 
     Args:
         project_id: Project identifier from lsp_register_project.
         file_path: Absolute path to the source file.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_diagnostics", {
         "project_id": project_id, "file_path": file_path,
+        "timeout": timeout,
     })
     return _to_diagnostics_result(result)
 
 
 @mcp.tool()
 @_tag_errors
-async def lsp_workspace_symbols(project_id: str,
-                                query: str) -> WorkspaceSymbolsResult:
+async def lsp_workspace_symbols(project_id: str, query: str,
+                                timeout: int = 120) -> WorkspaceSymbolsResult:
     """Search for symbols across the entire project by name or pattern.
 
     Returns matching symbols from all files in the project. Useful for finding
@@ -714,9 +793,11 @@ async def lsp_workspace_symbols(project_id: str,
     Args:
         project_id: Project identifier from lsp_register_project.
         query: Symbol name or pattern to search for.
+        timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("lsp_workspace_symbols", {
         "project_id": project_id, "query": query,
+        "timeout": timeout,
     })
     return _to_workspace_symbols_result(result)
 
