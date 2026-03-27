@@ -136,14 +136,17 @@ class DaemonClient:
                 pass
             self._reader_task = None
 
-        if self._writer:
+        writer = self._writer
+        self._writer = None
+        self._reader = None
+        if writer:
+            transport = writer.transport
             try:
-                self._writer.close()
-                await self._writer.wait_closed()
+                writer.close()
+                await writer.wait_closed()
             except Exception:
-                pass
-            self._writer = None
-            self._reader = None
+                if transport:
+                    transport.close()
 
         for fut in self._pending.values():
             if not fut.done():
