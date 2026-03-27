@@ -36,6 +36,7 @@ by using LSP tools for structured navigation instead of reading files line by li
    - `lsp_type_hierarchy_supertypes` / `lsp_type_hierarchy_subtypes` for single-level type info
    - `lsp_document_symbols` to list all symbols in a file
    - `lsp_diagnostics` to get compiler errors and warnings
+   - `lsp_regenerate_index` to force-rebuild the index if results seem stale
 5. **Report** findings with exact file paths, line numbers, and explanations
 6. **Clean up** with `lsp_deregister_project` when done
 
@@ -69,5 +70,9 @@ by using LSP tools for structured navigation instead of reading files line by li
   the index is still being built and results may be incomplete. Wait or re-query later.
 - **All positions are 1-based.** Line and character offsets in both input and output
   start at 1. Values from one tool's output can be fed directly into another tool's input.
+- **All tools accept `timeout`.** Optional timeout parameter (seconds) overrides the
+  default readiness timeout. Use higher values for large codebases (e.g. `timeout=300`).
+- **Use `lsp_regenerate_index` to rebuild.** If the index is stale or corrupt after
+  major build changes, this cleans managed data and force-restarts the LSP server.
 - **Always deregister when done** to release resources. The LSP server stops when the
   refcount reaches 0.

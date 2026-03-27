@@ -66,7 +66,11 @@ Console script: `karellen-lsp-mcp` → `karellen_lsp_mcp.server:main`
   Searching progress seen, and no active progress tokens — preventing premature query
   dispatch during cold/warm index builds.
 - **Staleness detection**: `compile_commands.json` is checked for freshness (build config
-  mtime, dead source references) before use. Stale files trigger regeneration for CMake/Meson.
+  mtime, >= 5% dead source references) before use. Stale files trigger regeneration for
+  CMake/Meson. Use `lsp_regenerate_index` to force regeneration.
+- **Per-tool timeout**: All tools accept an optional `timeout` parameter (seconds) that
+  overrides the daemon's `LSP_MCP_READY_TIMEOUT` for that specific call. Passed in params
+  to the daemon, read by `_handle_lsp_request` via `params.get("timeout")`.
 - **Signal handling**: SIGTERM/SIGINT handled in both frontend and daemon. Frontend monitors
   parent PID death via background thread (2s polling) to avoid orphan processes.
 

@@ -156,4 +156,8 @@ lsp_deregister_project(project_id="<id>")
 - **Check indexing status on large codebases.** Cross-file queries wait for indexing
   automatically, but `lsp_indexing_status` shows progress.
 - **All positions are 1-based.**
+- **All tools accept `timeout`.** Optional timeout parameter (seconds) overrides the
+  default readiness timeout. Use higher values for large codebases (e.g. `timeout=300`).
+- **Use `lsp_regenerate_index` to rebuild.** If the index is stale or corrupt, this
+  cleans managed data and force-restarts the LSP server.
 - **Always deregister when done** to release resources.

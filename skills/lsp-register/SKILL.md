@@ -147,6 +147,10 @@ This decrements the refcount. The LSP server stops when all sessions deregister.
   LSP server instance (refcounted).
 - **Use `force=True` to restart.** If the LSP server gets into a bad state, re-register
   with `force=True` to kill and restart it.
+- **Use `lsp_regenerate_index` to rebuild from scratch.** Cleans all managed data
+  (compilation databases, workspace caches) and force-restarts the LSP server.
 - **All positions are 1-based.** Line and character offsets start at 1.
+- **All tools accept `timeout`.** Optional timeout parameter (seconds) overrides the
+  default readiness timeout. Defaults: 30s for lifecycle tools, 120s for query tools.
 - **Cross-file queries include indexing status.** Check the `indexing` field in results;
   if `true`, results may be incomplete.

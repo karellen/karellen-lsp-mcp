@@ -66,11 +66,15 @@ A `compile_commands.json` is considered stale if either condition holds:
 
 - **Build config newer**: any `CMakeLists.txt` or `meson.build` in the project
   tree has a modification time newer than the `compile_commands.json`
-- **Dead source references**: any source file referenced in the compilation
-  database no longer exists on disk
+- **Dead source references**: 5% or more of source files referenced in the
+  compilation database no longer exist on disk. A single missing file (e.g.,
+  a deleted or renamed source) does not trigger regeneration.
 
 All referenced files are checked (not sampled), which takes ~10-20ms even for
 large projects (10K+ entries) due to OS dentry caching.
+
+Use `lsp_regenerate_index(project_id)` to force regeneration regardless of
+staleness detection.
 
 ### CMake generation details
 

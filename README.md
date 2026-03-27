@@ -244,9 +244,12 @@ lsp_register_project(
   fed directly into another tool's input (e.g. `lsp_read_definition`)
 - **Stale compile_commands.json is auto-detected**: if build config files
   (`CMakeLists.txt`, `meson.build`) are newer than `compile_commands.json`, or
-  referenced source files no longer exist, the server regenerates it automatically
-  for CMake/Meson projects. For other build systems, the stale file is used with a
-  warning
+  5% or more of referenced source files no longer exist, the server regenerates
+  it automatically for CMake/Meson projects. For other build systems, the stale
+  file is used with a warning. Use `lsp_regenerate_index` to force regeneration
+- **Per-tool timeout**: all tools accept an optional `timeout` parameter (seconds)
+  to override the default readiness timeout for that call. Useful for large
+  codebases or debugging timeout issues
 - **Deregister when done**: `lsp_deregister_project` decrements the refcount; the LSP
   server shuts down when all sessions deregister
 ````
@@ -257,7 +260,9 @@ lsp_register_project(
 | Tool | Description |
 |------|-------------|
 | `lsp_scan_languages` | Scan project for file extensions and recommend LSP registrations. Lightweight alternative to detect. |
+| `lsp_detect_project` | Detect languages and build systems without registering. Analyzes build markers, IDE metadata, source conventions. |
 | `lsp_register_project` | Register a project for LSP analysis. Returns a project_id. Multiple sessions sharing the same project get the same LSP server. |
+| `lsp_regenerate_index` | Clean managed data (compilation databases, workspace caches) and force-restart the LSP server. |
 | `lsp_deregister_project` | Deregister a project. Decrements refcount; stops LSP server at 0. |
 | `lsp_list_projects` | List all registered projects with status, refcounts, and paths. |
 | `lsp_indexing_status` | Query indexing progress for a project: state, elapsed time, active tasks with percentages, completed task count. Returns immediately without waiting for readiness. |
@@ -388,9 +393,24 @@ MCP server configuration:
 }
 ```
 
+#### Per-Tool Timeout
+
+All tools accept an optional `timeout` parameter (in seconds) that overrides the
+daemon's default readiness timeout for that specific call. This is useful for
+debugging or for large codebases that need more time to index:
+
+```
+lsp_find_references(project_id="<id>", file_path="...", line=42, character=10, timeout=300)
+```
+
+Default timeouts: 30s for lifecycle tools (scan, detect, deregister, list, indexing_status),
+120s for query tools and registration.
+
+#### Environment Variables
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LSP_MCP_READY_TIMEOUT` | 120 | Base timeout (seconds) for cross-file queries to wait for indexing. Actual timeout extends dynamically based on indexing progress |
+| `LSP_MCP_READY_TIMEOUT` | 120 | Base timeout (seconds) for cross-file queries to wait for indexing. Overridden by per-tool `timeout` parameter. Actual timeout extends dynamically based on indexing progress |
 | `LSP_MCP_REQUEST_TIMEOUT` | 60 | Max seconds to wait for a single LSP JSON-RPC response |
 | `LSP_MCP_CLIENT_TIMEOUT` | 180 | Max seconds for the MCP frontend to wait for a daemon response (must exceed ready + request timeouts) |
 | `LSP_MCP_IDLE_TIMEOUT` | 300 | Seconds before the daemon auto-exits when idle (no connections, no projects) |
