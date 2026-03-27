@@ -224,6 +224,40 @@ class CompileCommandsStalenessTest(unittest.TestCase):
             ], f)
         self.assertFalse(_is_compile_commands_stale(cc_path, self.tmpdir))
 
+    def test_below_5pct_missing_not_stale(self):
+        # 1 missing out of 21 files = ~4.8% < 5% threshold
+        existing = []
+        for i in range(20):
+            src = os.path.join(self.tmpdir, "file%d.c" % i)
+            with open(src, "w") as f:
+                f.write("int f%d() {}" % i)
+            existing.append(src)
+        entries = [{"file": s, "command": "cc x",
+                    "directory": self.tmpdir} for s in existing]
+        entries.append({"file": "/nonexistent/gone.c", "command": "cc x",
+                        "directory": self.tmpdir})
+        cc_path = os.path.join(self.tmpdir, "compile_commands.json")
+        with open(cc_path, "w") as f:
+            json.dump(entries, f)
+        self.assertFalse(_is_compile_commands_stale(cc_path, self.tmpdir))
+
+    def test_at_5pct_missing_is_stale(self):
+        # 1 missing out of 20 files = 5% >= 5% threshold
+        existing = []
+        for i in range(19):
+            src = os.path.join(self.tmpdir, "file%d.c" % i)
+            with open(src, "w") as f:
+                f.write("int f%d() {}" % i)
+            existing.append(src)
+        entries = [{"file": s, "command": "cc x",
+                    "directory": self.tmpdir} for s in existing]
+        entries.append({"file": "/nonexistent/gone.c", "command": "cc x",
+                        "directory": self.tmpdir})
+        cc_path = os.path.join(self.tmpdir, "compile_commands.json")
+        with open(cc_path, "w") as f:
+            json.dump(entries, f)
+        self.assertTrue(_is_compile_commands_stale(cc_path, self.tmpdir))
+
     def test_relative_paths_resolved_against_directory(self):
         src = os.path.join(self.tmpdir, "main.c")
         with open(src, "w") as f:
@@ -236,7 +270,7 @@ class CompileCommandsStalenessTest(unittest.TestCase):
                 {"file": "gone.c", "command": "cc gone.c",
                  "directory": self.tmpdir},
             ], f)
-        # One of two files missing -> stale
+        # 1 of 2 missing = 50% -> stale
         self.assertTrue(_is_compile_commands_stale(cc_path, self.tmpdir))
 
     def test_nonexistent_cc_file_not_stale(self):

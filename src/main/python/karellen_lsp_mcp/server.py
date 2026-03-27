@@ -293,6 +293,25 @@ async def lsp_register_project(project_path: str, language: str = None,
 
 @mcp.tool()
 @_tag_errors
+async def lsp_regenerate_index(project_id: str) -> RegisterResult:
+    """Regenerate the project index from scratch.
+
+    Cleans all managed data (compilation databases, workspace caches) and
+    force-restarts the LSP server. Use this when the index is stale or
+    corrupt, e.g. after major build configuration changes.
+
+    The returned project_id may differ from the input if the project
+    configuration changed.
+
+    Args:
+        project_id: Project identifier from lsp_register_project.
+    """
+    result = await _request("regenerate_index", {"project_id": project_id})
+    return RegisterResult(project_id=result["project_id"])
+
+
+@mcp.tool()
+@_tag_errors
 async def lsp_deregister_project(project_id: str) -> StringResult:
     """Deregister a project. Decrements refcount; stops LSP server when it reaches 0.
 
