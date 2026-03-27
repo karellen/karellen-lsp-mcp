@@ -48,6 +48,11 @@ def set_properties(project):
     project.depends_on("filelock")
     project.depends_on("platformdirs")
 
+    project.depends_on("karellen-clangd", extra="clangd")
+    project.depends_on("karellen-jdtls", extra="jdtls")
+    project.depends_on("karellen-clangd", extra="all")
+    project.depends_on("karellen-jdtls", extra="all")
+
     project.set_property("integrationtest_inherit_environment", True)
 
     project.set_property("coverage_break_build", False)
