@@ -210,6 +210,27 @@ class _FrontendSession:
         elif method == "list_projects":
             return registry.list_projects()
 
+        elif method == "regenerate_index":
+            project_id = params["project_id"]
+            entry = registry.get_client(project_id)
+            from karellen_lsp_mcp.lsp_adapter import get_adapter
+            adapter = get_adapter(entry.language)
+            if adapter is not None:
+                adapter.clean_managed_data(entry.path)
+            # Force re-register: stops existing server, re-runs
+            # detection and adapter configuration from scratch
+            new_id = await registry.register(
+                project_path=entry.path,
+                language=entry.language,
+                lsp_command=entry.lsp_command,
+                build_info=entry.build_info,
+                force=True,
+            )
+            # Update session tracking
+            self.registered_projects.discard(project_id)
+            self.registered_projects.add(new_id)
+            return {"project_id": new_id}
+
         elif method == "indexing_status":
             project_id = params["project_id"]
             entry = registry.get_client(project_id)

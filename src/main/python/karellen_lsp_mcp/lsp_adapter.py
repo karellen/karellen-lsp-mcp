@@ -68,6 +68,9 @@ class LspAdapter:
     # computation, so all aliases share one LSP server instance.
     languages = ()
 
+    # Name used for per-project managed directories. Subclasses should set this.
+    managed_dir_name = None
+
     def check_server(self):
         """Check if the LSP server binary is available.
 
@@ -96,6 +99,19 @@ class LspAdapter:
             ValueError: If the adapter cannot configure (e.g., LSP server not found).
         """
         raise NotImplementedError
+
+    def clean_managed_data(self, project_path):
+        """Remove all managed data directories for this adapter and project.
+
+        Called before force-restarting an LSP server to ensure a clean
+        regeneration of indexes, compilation databases, etc.
+        """
+        if self.managed_dir_name is None:
+            return
+        managed = _project_managed_dir(project_path, self.managed_dir_name)
+        if os.path.isdir(managed):
+            _shutil.rmtree(managed)
+            logger.info("Cleaned managed data: %s", managed)
 
 
 def _path_to_uri(path):
@@ -175,17 +191,26 @@ def _is_compile_commands_stale(cc_path, project_path):
     if not isinstance(entries, list) or not entries:
         return False
 
+    total = 0
+    missing = []
     for entry in entries:
         src = entry.get("file", "")
         if not src:
             continue
+        total += 1
         if not os.path.isabs(src):
             directory = entry.get("directory", project_path)
             src = os.path.join(directory, src)
         if not os.path.exists(src):
-            logger.info("compile_commands.json (%s) references missing "
-                        "source file: %s", cc_path, src)
-            return True
+            missing.append(src)
+
+    if total > 0 and len(missing) / total >= 0.05:
+        logger.info("compile_commands.json (%s) has %.0f%% missing "
+                    "source files (%d/%d): %s", cc_path,
+                    100.0 * len(missing) / total,
+                    len(missing), total,
+                    ", ".join(missing[:5]))
+        return True
 
     return False
 
@@ -205,6 +230,7 @@ class ClangdAdapter(LspAdapter):
     """
 
     languages = ("c", "cpp")
+    managed_dir_name = "clangd"
 
     def check_server(self):
         available = _shutil.which("clangd") is not None
@@ -433,6 +459,7 @@ class JdtlsAdapter(LspAdapter):
     """Adapter for Eclipse jdtls (Java, Kotlin, Scala, Groovy)."""
 
     languages = ("java", "kotlin")
+    managed_dir_name = "jdtls"
 
     def check_server(self):
         available = _shutil.which("jdtls") is not None
