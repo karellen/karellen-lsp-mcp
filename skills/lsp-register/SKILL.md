@@ -11,8 +11,9 @@ all `lsp_*` query tools become available for that project.
 
 - `karellen-lsp-mcp` must be installed and on PATH
 - An LSP server for the target language:
-  - **C/C++**: `clangd` (install via package manager)
-  - **Java/Kotlin**: `jdtls` (install via `pip install karellen-jdtls-kotlin`)
+  - **C/C++**: `clangd` — install via `pip install --user karellen-lsp-mcp[clangd]` or system package manager
+  - **Java/Kotlin**: `jdtls` — install via `pip install --user karellen-lsp-mcp[jdtls]`
+  - **All servers**: `pip install --user karellen-lsp-mcp[all]`
   - **Other languages**: any LSP server, specified via `lsp_command`
 
 ## Workflow

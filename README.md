@@ -70,13 +70,21 @@ IDE metadata (JetBrains `.idea/`, Eclipse, VS Code), and source file conventions
 ## Installation
 
 ```bash
-pip install karellen-lsp-mcp
+pip install --user karellen-lsp-mcp
+```
+
+Install with LSP server dependencies:
+
+```bash
+pip install --user karellen-lsp-mcp[clangd]    # C/C++ support
+pip install --user karellen-lsp-mcp[jdtls]     # Java/Kotlin support
+pip install --user karellen-lsp-mcp[all]       # All LSP servers
 ```
 
 Or with pipx for an isolated environment:
 
 ```bash
-pipx install karellen-lsp-mcp
+pipx install 'karellen-lsp-mcp[all]'
 ```
 
 ## Claude Code Integration
