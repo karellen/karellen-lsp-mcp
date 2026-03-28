@@ -43,14 +43,14 @@ by using LSP tools for structured navigation instead of reading files line by li
 ## Language-Specific Setup
 
 ### C/C++
-- Default LSP server: clangd (must be on PATH)
+- Default LSP server: clangd — install via `pip install --user karellen-lsp-mcp[clangd]` or system package manager
 - clangd needs `compile_commands.json` for accurate results
 - Auto-detection finds existing `compile_commands.json` or generates one for CMake/Meson
 - For projects without `compile_commands.json`, clangd still provides basic functionality
 - Use `build_info={"compile_commands_dir": "/path/to/dir"}` if auto-detection fails
 
 ### Java/Kotlin
-- Default LSP server: jdtls from karellen-jdtls-kotlin (must be on PATH as `jdtls`)
+- Default LSP server: jdtls — install via `pip install --user karellen-lsp-mcp[jdtls]`
 - Auto-detection identifies Gradle/Maven/Ant build systems
 - Multi-module projects are handled automatically (settings.gradle/pom.xml module discovery)
 - Kotlin is detected from `.idea/kotlinc.xml` or `.kt` files under `src/`

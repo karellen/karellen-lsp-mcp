@@ -11,8 +11,9 @@ chains, find all usages of a symbol, or check compiler diagnostics across a code
 
 - `karellen-lsp-mcp` must be installed and on PATH
 - An LSP server for the target language on PATH:
-  - **C/C++**: `clangd`
-  - **Java/Kotlin**: `jdtls` (from `karellen-jdtls-kotlin`)
+  - **C/C++**: `clangd` — install via `pip install --user karellen-lsp-mcp[clangd]` or system package manager
+  - **Java/Kotlin**: `jdtls` — install via `pip install --user karellen-lsp-mcp[jdtls]`
+  - **All servers**: `pip install --user karellen-lsp-mcp[all]`
 
 ## Workflow
 

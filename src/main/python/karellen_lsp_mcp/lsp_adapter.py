@@ -234,8 +234,9 @@ class ClangdAdapter(LspAdapter):
 
     def check_server(self):
         available = _shutil.which("clangd") is not None
-        hint = ("Install clang-tools-extra (Fedora/RHEL), "
-                "clangd (Debian/Ubuntu), or llvm (macOS).")
+        hint = ("Run: pip install --user karellen-lsp-mcp[clangd] — "
+                "or install clang-tools-extra (Fedora/RHEL), "
+                "clangd (Debian/Ubuntu), llvm (macOS).")
         return available, hint
 
     def configure(self, project_path, language, lsp_command=None,
@@ -463,7 +464,7 @@ class JdtlsAdapter(LspAdapter):
 
     def check_server(self):
         available = _shutil.which("jdtls") is not None
-        hint = "Run: pip install karellen-jdtls-kotlin"
+        hint = "Run: pip install --user karellen-lsp-mcp[jdtls]"
         return available, hint
 
     def configure(self, project_path, language, lsp_command=None,

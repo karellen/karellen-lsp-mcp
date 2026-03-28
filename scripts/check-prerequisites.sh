@@ -20,7 +20,7 @@ check_command() {
   fi
 }
 
-check_command "karellen-lsp-mcp" "Run: pip install karellen-lsp-mcp"
+check_command "karellen-lsp-mcp" "Run: pip install --user karellen-lsp-mcp[all]"
 
 [ -z "$WARNINGS" ] && exit 0
 
