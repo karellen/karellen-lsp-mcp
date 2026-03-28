@@ -521,9 +521,16 @@ class JdtlsAdapter(LspAdapter):
         if gradle_modules_source:
             settings["java.import.gradle.wrapper.enabled"] = True
 
+        opts = {}
         if settings:
-            return {"settings": settings}
-        return None
+            opts["settings"] = settings
+
+        opts["extendedClientCapabilities"] = {
+            "classFileContentsSupport": True,
+            "shouldLanguageServerExitOnShutdown": True,
+        }
+
+        return opts if opts else None
 
 
 # ---------------------------------------------------------------------------
