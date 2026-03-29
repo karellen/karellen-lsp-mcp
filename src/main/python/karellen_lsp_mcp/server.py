@@ -118,17 +118,21 @@ async def _request(method, params=None):
 def _to_location_result(data):
     locations = [Location(file=loc["file"], line=loc["line"], character=loc["character"])
                  for loc in data.get("locations", [])]
-    return LocationResult(locations=locations, indexing=data.get("indexing", False))
+    return LocationResult(locations=locations, indexing=data.get("indexing", False),
+                          elapsed_ms=data.get("elapsed_ms", 0))
 
 
 def _to_hover_result(data):
+    elapsed = data.get("elapsed_ms", 0)
     if "parts" in data:
         parts_text = []
         for p in data["parts"]:
             parts_text.append(p.get("content", ""))
         return HoverResult(content="\n\n".join(parts_text),
-                           language=data["parts"][0].get("language") if data["parts"] else None)
-    return HoverResult(content=data.get("content"), language=data.get("language"))
+                           language=data["parts"][0].get("language") if data["parts"] else None,
+                           elapsed_ms=elapsed)
+    return HoverResult(content=data.get("content"), language=data.get("language"),
+                       elapsed_ms=elapsed)
 
 
 def _to_symbol_info(s):
@@ -139,7 +143,8 @@ def _to_symbol_info(s):
 
 def _to_document_symbols_result(data):
     symbols = [_to_symbol_info(s) for s in data.get("symbols", [])]
-    return DocumentSymbolsResult(symbols=symbols)
+    return DocumentSymbolsResult(symbols=symbols,
+                                 elapsed_ms=data.get("elapsed_ms", 0))
 
 
 def _to_call_hierarchy_result(data):
@@ -147,7 +152,8 @@ def _to_call_hierarchy_result(data):
                                line=i["line"], call_sites=i.get("call_sites", 1))
              for i in data.get("items", [])]
     return CallHierarchyResult(direction=data["direction"], items=items,
-                               indexing=data.get("indexing", False))
+                               indexing=data.get("indexing", False),
+                               elapsed_ms=data.get("elapsed_ms", 0))
 
 
 def _to_type_hierarchy_result(data):
@@ -155,7 +161,8 @@ def _to_type_hierarchy_result(data):
                                line=i["line"])
              for i in data.get("items", [])]
     return TypeHierarchyResult(direction=data["direction"], items=items,
-                               indexing=data.get("indexing", False))
+                               indexing=data.get("indexing", False),
+                               elapsed_ms=data.get("elapsed_ms", 0))
 
 
 def _to_call_tree_node(data):
@@ -172,7 +179,8 @@ def _to_call_tree_result(data):
     root = _to_call_tree_node(data.get("root"))
     return CallTreeResult(direction=data["direction"], root=root,
                           indexing=data.get("indexing", False),
-                          truncated=data.get("truncated", False))
+                          truncated=data.get("truncated", False),
+                          elapsed_ms=data.get("elapsed_ms", 0))
 
 
 def _to_type_tree_node(data):
@@ -188,7 +196,8 @@ def _to_type_tree_result(data):
     root = _to_type_tree_node(data.get("root"))
     return TypeTreeResult(direction=data["direction"], root=root,
                           indexing=data.get("indexing", False),
-                          truncated=data.get("truncated", False))
+                          truncated=data.get("truncated", False),
+                          elapsed_ms=data.get("elapsed_ms", 0))
 
 
 def _to_workspace_symbols_result(data):
@@ -197,7 +206,8 @@ def _to_workspace_symbols_result(data):
         line=s["line"], container=s.get("container"))
         for s in data.get("symbols", [])]
     return WorkspaceSymbolsResult(symbols=symbols,
-                                  indexing=data.get("indexing", False))
+                                  indexing=data.get("indexing", False),
+                                  elapsed_ms=data.get("elapsed_ms", 0))
 
 
 def _to_diagnostics_result(data):
@@ -205,7 +215,8 @@ def _to_diagnostics_result(data):
                               severity=d["severity"], message=d["message"],
                               source=d.get("source"))
                    for d in data.get("diagnostics", [])]
-    return DiagnosticsResult(diagnostics=diagnostics, indexing=data.get("indexing", False))
+    return DiagnosticsResult(diagnostics=diagnostics, indexing=data.get("indexing", False),
+                             elapsed_ms=data.get("elapsed_ms", 0))
 
 
 # --- Lifecycle Tools ---
