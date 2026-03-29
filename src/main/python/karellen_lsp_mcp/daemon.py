@@ -267,6 +267,7 @@ class _FrontendSession:
         project_id = params["project_id"]
         entry = registry.get_client(project_id)
         client = entry.client
+        normalizer = client.normalizer
 
         # Check version-based feature support before dispatching
         lsp_method = self._LSP_METHOD_MAP.get(method)
@@ -326,22 +327,26 @@ class _FrontendSession:
 
             if method == "lsp_read_definition":
                 result = await client.definition(file_uri, line, character)
-                return _parse_locations(result, indexing=False)
+                return _parse_locations(
+                    result, indexing=False, normalizer=normalizer)
 
             elif method == "lsp_read_declaration":
                 result = await client.declaration(file_uri, line, character)
-                return _parse_locations(result, indexing=False)
+                return _parse_locations(
+                    result, indexing=False, normalizer=normalizer)
 
             elif method == "lsp_find_implementations":
                 result = await _query_with_fallback(
                     client, file_uri, line, character,
                     client.implementation)
-                return _parse_locations(result, indexing=indexing)
+                return _parse_locations(
+                    result, indexing=indexing, normalizer=normalizer)
 
             elif method == "lsp_read_type_definition":
                 result = await client.type_definition(
                     file_uri, line, character)
-                return _parse_locations(result, indexing=False)
+                return _parse_locations(
+                    result, indexing=False, normalizer=normalizer)
 
             elif method == "lsp_find_references":
                 include_decl = params.get("include_declaration", True)
@@ -352,7 +357,8 @@ class _FrontendSession:
 
                 result = await _query_with_fallback(
                     client, file_uri, line, character, _refs_query)
-                return _parse_locations(result, indexing=indexing)
+                return _parse_locations(
+                    result, indexing=indexing, normalizer=normalizer)
 
             elif method == "lsp_hover":
                 result = await client.hover(file_uri, line, character)
@@ -367,7 +373,8 @@ class _FrontendSession:
                     return {"direction": "incoming", "items": [],
                             "indexing": indexing}
                 return _parse_call_hierarchy(calls, "incoming",
-                                             indexing=indexing)
+                                             indexing=indexing,
+                                             normalizer=normalizer)
 
             elif method == "lsp_call_hierarchy_outgoing":
                 calls, _ = await _prepare_with_fallback(
@@ -378,7 +385,8 @@ class _FrontendSession:
                     return {"direction": "outgoing", "items": [],
                             "indexing": indexing}
                 return _parse_call_hierarchy(calls, "outgoing",
-                                             indexing=indexing)
+                                             indexing=indexing,
+                                             normalizer=normalizer)
 
             elif method == "lsp_type_hierarchy_supertypes":
                 result, _ = await _prepare_with_fallback(
@@ -389,7 +397,8 @@ class _FrontendSession:
                     return {"direction": "supertypes", "items": [],
                             "indexing": indexing}
                 return _parse_type_hierarchy(result, "supertypes",
-                                             indexing=indexing)
+                                             indexing=indexing,
+                                             normalizer=normalizer)
 
             elif method == "lsp_type_hierarchy_subtypes":
                 result, _ = await _prepare_with_fallback(
@@ -400,7 +409,8 @@ class _FrontendSession:
                     return {"direction": "subtypes", "items": [],
                             "indexing": indexing}
                 return _parse_type_hierarchy(result, "subtypes",
-                                             indexing=indexing)
+                                             indexing=indexing,
+                                             normalizer=normalizer)
 
             elif method in (
                     "lsp_call_tree_incoming",
@@ -409,7 +419,7 @@ class _FrontendSession:
                     "lsp_type_tree_subtypes"):
                 return await _handle_tree_query(
                     client, method, params, file_uri, line,
-                    character, indexing)
+                    character, indexing, normalizer)
 
         elif method == "lsp_document_symbols":
             file_uri = registry.validate_file_path(project_id, params["file_path"])
@@ -426,7 +436,8 @@ class _FrontendSession:
         elif method == "lsp_workspace_symbols":
             query = params.get("query", "")
             result = await client.workspace_symbol(query)
-            return _parse_workspace_symbols(result, indexing=indexing)
+            return _parse_workspace_symbols(
+                result, indexing=indexing, normalizer=normalizer)
 
         else:
             raise ProjectRegistryError("Unknown LSP method: %s" % method)
@@ -447,7 +458,9 @@ class _FrontendSession:
 # LSP result parsers — convert raw LSP JSON to structured dicts
 # ---------------------------------------------------------------------------
 
-def _uri_to_path(uri):
+def _uri_to_path(uri, normalizer=None):
+    if normalizer:
+        uri = normalizer.normalize_uri(uri)
     if uri and uri.startswith("file://"):
         return urllib.parse.unquote(uri)[7:]
     return uri or ""
@@ -463,7 +476,7 @@ _SYMBOL_KIND_NAMES = {
 }
 
 
-def _parse_locations(result, indexing=False):
+def _parse_locations(result, indexing=False, normalizer=None):
     locations = []
     if result is not None:
         if isinstance(result, dict):
@@ -478,7 +491,7 @@ def _parse_locations(result, indexing=False):
 
             start = rng.get("start", {})
             locations.append({
-                "file": _uri_to_path(uri),
+                "file": _uri_to_path(uri, normalizer),
                 "line": start.get("line", 0) + 1,
                 "character": start.get("character", 0) + 1,
             })
@@ -549,7 +562,8 @@ def _parse_document_symbols(result):
     return {"symbols": [_parse_symbol(sym) for sym in result]}
 
 
-def _parse_call_hierarchy(calls, direction, indexing=False):
+def _parse_call_hierarchy(calls, direction, indexing=False,
+                          normalizer=None):
     items = []
     if calls:
         for call in calls:
@@ -563,7 +577,7 @@ def _parse_call_hierarchy(calls, direction, indexing=False):
             items.append({
                 "name": item.get("name", "?"),
                 "kind": _SYMBOL_KIND_NAMES.get(kind_num, ""),
-                "file": _uri_to_path(item.get("uri", "")),
+                "file": _uri_to_path(item.get("uri", ""), normalizer),
                 "line": start.get("line", 0) + 1,
                 "call_sites": len(from_ranges) if from_ranges else 1,
             })
@@ -574,7 +588,8 @@ def _parse_call_hierarchy(calls, direction, indexing=False):
     return result_dict
 
 
-def _parse_type_hierarchy(items_raw, direction, indexing=False):
+def _parse_type_hierarchy(items_raw, direction, indexing=False,
+                          normalizer=None):
     items = []
     if items_raw:
         for item in items_raw:
@@ -584,7 +599,7 @@ def _parse_type_hierarchy(items_raw, direction, indexing=False):
             items.append({
                 "name": item.get("name", "?"),
                 "kind": _SYMBOL_KIND_NAMES.get(kind_num, ""),
-                "file": _uri_to_path(item.get("uri", "")),
+                "file": _uri_to_path(item.get("uri", ""), normalizer),
                 "line": start.get("line", 0) + 1,
             })
 
@@ -707,7 +722,7 @@ async def _prepare_with_fallback(client, file_uri, line, character,
     return results, lsp_item
 
 
-def _make_tree_node(item, call_sites=None):
+def _make_tree_node(item, call_sites=None, normalizer=None):
     """Build a tree node dict from a raw LSP hierarchy item."""
     kind_num = item.get("kind", 0)
     rng = item.get("selectionRange") or item.get("range", {})
@@ -715,7 +730,7 @@ def _make_tree_node(item, call_sites=None):
     node = {
         "name": item.get("name", "?"),
         "kind": _SYMBOL_KIND_NAMES.get(kind_num, ""),
-        "file": _uri_to_path(item.get("uri", "")),
+        "file": _uri_to_path(item.get("uri", ""), normalizer),
         "line": start.get("line", 0) + 1,
         "children": [],
     }
@@ -735,7 +750,8 @@ _TREE_MAX_NODES = 250
 
 async def _walk_tree(client, node, lsp_item, direction,
                      depth, visited, sem, node_count,
-                     query_fn, extract_children):
+                     query_fn, extract_children,
+                     normalizer=None):
     """Recursively expand a hierarchy (call or type) into a tree.
 
     *query_fn(lsp_item)* fetches the next level from the LSP server.
@@ -769,7 +785,8 @@ async def _walk_tree(client, node, lsp_item, direction,
 
     expand = []
     for raw_item, call_sites in extract_children(results):
-        child = _make_tree_node(raw_item, call_sites)
+        child = _make_tree_node(raw_item, call_sites,
+                                normalizer=normalizer)
         node["children"].append(child)
         node_count[0] += 1
         child_key = _node_key(child)
@@ -780,7 +797,7 @@ async def _walk_tree(client, node, lsp_item, direction,
         await asyncio.gather(*(
             _walk_tree(client, c, ri, direction,
                        depth - 1, visited, sem, node_count,
-                       query_fn, extract_children)
+                       query_fn, extract_children, normalizer)
             for c, ri in expand
         ))
 
@@ -831,7 +848,8 @@ _TREE_METHOD_CONFIG = {
 
 
 async def _handle_tree_query(client, method, params, file_uri,
-                             line, character, indexing):
+                             line, character, indexing,
+                             normalizer=None):
     """Shared handler for all recursive tree queries."""
     cfg = _TREE_METHOD_CONFIG[method]
     direction = cfg["direction"]
@@ -845,7 +863,7 @@ async def _handle_tree_query(client, method, params, file_uri,
         return {"direction": direction, "root": None,
                 "indexing": indexing}
 
-    root = _make_tree_node(lsp_item)
+    root = _make_tree_node(lsp_item, normalizer=normalizer)
     sem = asyncio.Semaphore(_TREE_WALK_CONCURRENCY)
     nc = [0]
     query_fn = getattr(client, cfg["query"])
@@ -853,14 +871,15 @@ async def _handle_tree_query(client, method, params, file_uri,
     await _walk_tree(client, root, lsp_item, direction,
                      max_depth, set(), sem, nc,
                      query_fn,
-                     lambda results: extract(results, direction))
+                     lambda results: extract(results, direction),
+                     normalizer)
     r = {"direction": direction, "root": root, "indexing": indexing}
     if nc[0] >= _TREE_MAX_NODES:
         r["truncated"] = True
     return r
 
 
-def _parse_workspace_symbols(result, indexing=False):
+def _parse_workspace_symbols(result, indexing=False, normalizer=None):
     """Parse workspace/symbol results into structured dicts."""
     symbols = []
     if result:
@@ -873,7 +892,7 @@ def _parse_workspace_symbols(result, indexing=False):
             entry = {
                 "name": sym.get("name", "?"),
                 "kind": _SYMBOL_KIND_NAMES.get(kind_num, ""),
-                "file": _uri_to_path(uri),
+                "file": _uri_to_path(uri, normalizer),
                 "line": start.get("line", 0) + 1,
             }
             container = sym.get("containerName")
