@@ -30,12 +30,14 @@ class Location:
 class LocationResult:
     locations: list[Location]
     indexing: bool = False
+    elapsed_ms: int = 0
 
 
 @dataclass
 class HoverResult:
     content: Optional[str] = None
     language: Optional[str] = None
+    elapsed_ms: int = 0
 
 
 @dataclass
@@ -50,6 +52,7 @@ class SymbolInfo:
 @dataclass
 class DocumentSymbolsResult:
     symbols: list[SymbolInfo]
+    elapsed_ms: int = 0
 
 
 @dataclass
@@ -66,6 +69,7 @@ class CallHierarchyResult:
     direction: str
     items: list[CallHierarchyItem]
     indexing: bool = False
+    elapsed_ms: int = 0
 
 
 @dataclass
@@ -81,6 +85,7 @@ class TypeHierarchyResult:
     direction: str
     items: list[TypeHierarchyItem]
     indexing: bool = False
+    elapsed_ms: int = 0
 
 
 @dataclass
@@ -100,6 +105,7 @@ class CallTreeResult:
     root: Optional["CallTreeNode"] = None
     indexing: bool = False
     truncated: bool = False
+    elapsed_ms: int = 0
 
 
 @dataclass
@@ -118,6 +124,7 @@ class TypeTreeResult:
     root: Optional["TypeTreeNode"] = None
     indexing: bool = False
     truncated: bool = False
+    elapsed_ms: int = 0
 
 
 @dataclass
@@ -133,6 +140,7 @@ class WorkspaceSymbolInfo:
 class WorkspaceSymbolsResult:
     symbols: list[WorkspaceSymbolInfo]
     indexing: bool = False
+    elapsed_ms: int = 0
 
 
 @dataclass
@@ -148,6 +156,7 @@ class Diagnostic:
 class DiagnosticsResult:
     diagnostics: list[Diagnostic]
     indexing: bool = False
+    elapsed_ms: int = 0
 
 
 @dataclass

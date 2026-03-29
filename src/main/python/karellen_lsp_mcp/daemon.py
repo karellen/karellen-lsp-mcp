@@ -22,6 +22,7 @@ import os
 import signal
 import struct
 import sys
+import time
 import urllib.parse
 
 from filelock import FileLock, Timeout
@@ -283,9 +284,14 @@ class _FrontendSession:
             token = request_timeout_override.set(ready_timeout)
 
         try:
-            return await self._dispatch_lsp(
+            t0 = time.monotonic()
+            result = await self._dispatch_lsp(
                 method, params, client, normalizer, registry,
                 project_id, ready_timeout)
+            if isinstance(result, dict):
+                result["elapsed_ms"] = round(
+                    (time.monotonic() - t0) * 1000)
+            return result
         finally:
             if token is not None:
                 request_timeout_override.reset(token)
