@@ -72,6 +72,10 @@ class LspClient:
         return self._server_capabilities
 
     @property
+    def normalizer(self):
+        return self._normalizer
+
+    @property
     def state(self):
         if self._normalizer is None:
             return ServerState.STOPPED

@@ -27,6 +27,7 @@ import enum
 import logging
 import re
 import time
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,14 @@ class LspNormalizer:
         tries alternate positions if the initial query returns empty.
         """
         return False
+
+    def normalize_uri(self, uri):
+        """Normalize a server-specific URI to a standard form.
+
+        Subclasses can override to convert proprietary URI schemes
+        (e.g. jdt://) into standard forms (e.g. jar:file://).
+        """
+        return uri
 
     def supports_method(self, method):
         """Return True if the LSP server supports the given method.
@@ -558,6 +567,11 @@ class JdtlsNormalizer(LspNormalizer):
                 best = pct
         return best
 
+    def normalize_uri(self, uri):
+        if uri and uri.startswith("jdt://"):
+            return _jdt_uri_to_jar_uri(uri)
+        return uri
+
     def is_transient_error(self, error_msg):
         lower = error_msg.lower()
         return any(frag in lower
@@ -580,6 +594,49 @@ class JdtlsNormalizer(LspNormalizer):
             self._state = ServerState.READY
             if self._ready_callback:
                 self._ready_callback()
+
+
+def _jdt_uri_to_jar_uri(uri):
+    """Convert a jdt:// URI to a jar:file:// URI.
+
+    Example input:
+      jdt://contents/yavi-0.9.1.jar/am.ik.yavi.core/...
+        ?=project/%5C/path%5C/to%5C/yavi-0.9.1.jar=...
+         /%3Cam.ik.yavi.core%28ConstraintViolations.class
+
+    The query string encodes:
+    - JAR path: backslash-escaped between project name and '=' delimiter
+    - Class ref: %3C=package, %28=class file separator
+    """
+    parsed = urllib.parse.urlparse(uri)
+    query = urllib.parse.unquote(parsed.query)
+
+    # Extract JAR path: between first / and next =
+    jar_path = None
+    if query:
+        first_slash = query.find("/")
+        if first_slash >= 0:
+            rest = query[first_slash + 1:]
+            eq_pos = rest.find("=")
+            if eq_pos >= 0:
+                raw_path = rest[:eq_pos]
+                jar_path = raw_path.replace("\\", "")
+
+    # Extract class: last < separates package root, ( separates class name
+    class_path = None
+    if query:
+        lt_pos = query.rfind("<")
+        if lt_pos >= 0:
+            class_ref = query[lt_pos + 1:]
+            paren_pos = class_ref.find("(")
+            if paren_pos >= 0:
+                package = class_ref[:paren_pos].replace(".", "/")
+                class_file = class_ref[paren_pos + 1:]
+                class_path = package + "/" + class_file
+
+    if jar_path and class_path:
+        return "jar:file://" + jar_path + "!/" + class_path
+    return uri
 
 
 def create_normalizer(command, warmup_timeout=60):

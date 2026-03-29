@@ -20,7 +20,7 @@ import unittest
 from karellen_lsp_mcp.lsp_client import LspClientError
 from karellen_lsp_mcp.lsp_normalizer import (
     ServerState, LspNormalizer, ClangdNormalizer, JdtlsNormalizer,
-    create_normalizer,
+    create_normalizer, _jdt_uri_to_jar_uri,
 )
 
 
@@ -610,6 +610,71 @@ class JdtlsNormalizerRetryPolicyTest(unittest.TestCase):
     def test_retry_delay(self):
         n = JdtlsNormalizer()
         self.assertEqual(n.retry_delay, 2.0)
+
+
+class JdtUriToJarUriTest(unittest.TestCase):
+    def test_converts_full_jdt_uri(self):
+        jdt_uri = (
+            "jdt://contents/yavi-0.9.1.jar/am.ik.yavi.core"
+            "/ConstraintViolations.java"
+            "?=tourlandish.aries"
+            "/%5C/home%5C/user%5C/.gradle%5C/caches%5C/modules-2"
+            "%5C/files-2.1%5C/am.ik.yavi%5C/yavi%5C/0.9.1"
+            "%5C/e90c540787468b5dbbf09bdf7e48b4585a8a8f38"
+            "%5C/yavi-0.9.1.jar"
+            "=/gradle_used_by_scope=/main,test=/"
+            "=/org.eclipse.jst.component.nondependency=/=/"
+            "%3Cam.ik.yavi.core%28ConstraintViolations.class"
+        )
+        result = _jdt_uri_to_jar_uri(jdt_uri)
+        self.assertEqual(
+            result,
+            "jar:file:///home/user/.gradle/caches/modules-2"
+            "/files-2.1/am.ik.yavi/yavi/0.9.1"
+            "/e90c540787468b5dbbf09bdf7e48b4585a8a8f38"
+            "/yavi-0.9.1.jar"
+            "!/am/ik/yavi/core/ConstraintViolations.class"
+        )
+
+    def test_converts_nested_package(self):
+        jdt_uri = (
+            "jdt://contents/lib.jar/com.example/Foo.java"
+            "?=proj/%5C/opt%5C/lib.jar"
+            "=/%3Ccom.example.sub%28Bar.class"
+        )
+        result = _jdt_uri_to_jar_uri(jdt_uri)
+        self.assertEqual(
+            result,
+            "jar:file:///opt/lib.jar!/com/example/sub/Bar.class"
+        )
+
+    def test_returns_uri_unchanged_when_no_query(self):
+        uri = "jdt://contents/lib.jar/com.example/Foo.java"
+        result = _jdt_uri_to_jar_uri(uri)
+        self.assertEqual(result, uri)
+
+    def test_normalize_uri_delegates_for_jdt(self):
+        n = JdtlsNormalizer()
+        jdt_uri = (
+            "jdt://contents/lib.jar/com.example/Foo.java"
+            "?=proj/%5C/opt%5C/lib.jar"
+            "=/%3Ccom.example%28Foo.class"
+        )
+        result = n.normalize_uri(jdt_uri)
+        self.assertEqual(
+            result,
+            "jar:file:///opt/lib.jar!/com/example/Foo.class"
+        )
+
+    def test_normalize_uri_passthrough_for_file(self):
+        n = JdtlsNormalizer()
+        uri = "file:///home/user/project/Foo.java"
+        self.assertEqual(n.normalize_uri(uri), uri)
+
+    def test_base_normalize_uri_passthrough(self):
+        n = LspNormalizer()
+        uri = "jdt://contents/lib.jar"
+        self.assertEqual(n.normalize_uri(uri), uri)
 
 
 if __name__ == "__main__":
