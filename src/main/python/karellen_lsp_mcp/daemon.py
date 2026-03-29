@@ -30,7 +30,7 @@ from platformdirs import user_log_dir as _user_log_dir
 from platformdirs import user_runtime_dir as _user_runtime_dir
 
 from karellen_lsp_mcp.project_registry import ProjectRegistry, ProjectRegistryError
-from karellen_lsp_mcp.lsp_client import LspClientError
+from karellen_lsp_mcp.lsp_client import LspClientError, request_timeout_override
 from karellen_lsp_mcp.lsp_normalizer import ServerState
 
 logger = logging.getLogger(__name__)
@@ -278,6 +278,20 @@ class _FrontendSession:
 
         ready_timeout = params.get("timeout", self.daemon.ready_timeout)
 
+        token = None
+        if "timeout" in params:
+            token = request_timeout_override.set(ready_timeout)
+
+        try:
+            return await self._dispatch_lsp(
+                method, params, client, normalizer, registry,
+                project_id, ready_timeout)
+        finally:
+            if token is not None:
+                request_timeout_override.reset(token)
+
+    async def _dispatch_lsp(self, method, params, client, normalizer,
+                            registry, project_id, ready_timeout):
         if method in self._SINGLE_FILE_METHODS:
             # Single-file queries work from the AST built on didOpen —
             # only need the server to finish the initialize handshake,
