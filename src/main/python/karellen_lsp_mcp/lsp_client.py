@@ -23,6 +23,7 @@ is selected automatically based on the server command.
 import asyncio
 import json
 import logging
+import contextvars
 import urllib.parse
 from pathlib import Path
 
@@ -33,6 +34,11 @@ from karellen_lsp_mcp.lsp_normalizer import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Per-request timeout override, scoped to the current async task.
+# Set by the daemon when a per-tool timeout is specified.
+request_timeout_override = contextvars.ContextVar(
+    "request_timeout_override", default=None)
 
 _converter = converters.get_converter()
 
@@ -523,8 +529,9 @@ class LspClient:
 
         await self._write_message(msg)
 
+        timeout = request_timeout_override.get() or self._request_timeout
         try:
-            return await asyncio.wait_for(fut, timeout=self._request_timeout)
+            return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(msg_id, None)
             raise LspClientError("Timeout waiting for response to %s" % method)
