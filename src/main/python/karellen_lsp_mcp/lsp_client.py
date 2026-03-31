@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import contextvars
+import os
 import urllib.parse
 from pathlib import Path
 
@@ -41,6 +42,21 @@ request_timeout_override = contextvars.ContextVar(
     "request_timeout_override", default=None)
 
 _converter = converters.get_converter()
+
+# Extension → LSP language ID mapping. Used for didOpen language detection
+# and for routing disambiguation in polyglot projects.
+EXT_TO_LANGUAGE = {
+    ".c": "c", ".h": "c",
+    ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
+    ".hh": "cpp", ".hpp": "cpp", ".hxx": "cpp",
+    ".py": "python",
+    ".rs": "rust",
+    ".java": "java",
+    ".kt": "kotlin", ".kts": "kotlin",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".go": "go",
+}
 
 
 class LspClientError(Exception):
@@ -93,7 +109,8 @@ class LspClient:
             return ServerState.STOPPED.value
         return self._normalizer.state_name
 
-    async def start(self, command, root_uri, init_options=None):
+    async def start(self, command, root_uri, init_options=None,
+                    log_dir=None):
         """Spawn LSP server and perform initialize/initialized handshake."""
         self._root_uri = root_uri
         root_path = urllib.parse.unquote(root_uri).removeprefix("file://")
@@ -106,11 +123,23 @@ class LspClient:
         self._normalizer.set_ready_callback(self._on_normalizer_ready)
 
         logger.info("Starting LSP server: %s (root=%s)", command, root_uri)
+
+        # Redirect stderr to a log file so the pipe buffer doesn't
+        # fill and block the server.
+        self._stderr_file = None
+        stderr_target = asyncio.subprocess.DEVNULL
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+            stderr_path = os.path.join(log_dir, "server.log")
+            self._stderr_file = open(stderr_path, "a")
+            stderr_target = self._stderr_file
+            logger.info("LSP server stderr → %s", stderr_path)
+
         self._process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=stderr_target,
         )
 
         self._reader_task = asyncio.create_task(self._read_loop())
@@ -234,15 +263,18 @@ class LspClient:
         if self._process is None:
             return
 
-        try:
-            await self._send_request("shutdown", None)
-        except Exception:
-            logger.warning("Shutdown request failed", exc_info=True)
+        # Skip graceful shutdown if the process is already dead
+        if self._process.returncode is None:
+            try:
+                await self._send_request("shutdown", None)
+            except Exception:
+                logger.warning("Shutdown request failed",
+                               exc_info=True)
 
-        try:
-            await self._send_notification("exit", None)
-        except Exception:
-            pass
+            try:
+                await self._send_notification("exit", None)
+            except Exception:
+                pass
 
         if self._reader_task:
             self._reader_task.cancel()
@@ -262,6 +294,9 @@ class LspClient:
         self._process = None
         self._open_files.clear()
         self._diagnostics.clear()
+        if self._stderr_file:
+            self._stderr_file.close()
+            self._stderr_file = None
 
         # Fail any pending requests
         for fut in self._pending.values():
@@ -317,20 +352,7 @@ class LspClient:
 
             # Detect language ID from extension
             ext = Path(file_path).suffix.lower()
-            lang_map = {
-                ".c": "c", ".h": "c",
-                ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
-                ".hh": "cpp", ".hpp": "cpp", ".hxx": "cpp",
-                ".py": "python",
-                ".rs": "rust",
-                ".java": "java",
-                ".kt": "kotlin",
-                ".kts": "kotlin",
-                ".js": "javascript",
-                ".ts": "typescript",
-                ".go": "go",
-            }
-            language_id = lang_map.get(ext, "plaintext")
+            language_id = EXT_TO_LANGUAGE.get(ext, "plaintext")
 
             params = types.DidOpenTextDocumentParams(
                 text_document=types.TextDocumentItem(
@@ -411,6 +433,42 @@ class LspClient:
     async def subtypes(self, item):
         """typeHierarchy/subtypes"""
         return await self._request_with_retry("typeHierarchy/subtypes", {"item": item})
+
+    async def proxy_request(self, method, params):
+        """Forward a raw LSP request with normalizer-driven retry."""
+        return await self._request_with_retry(method, params)
+
+    async def proxy_did_open(self, uri, language_id, version, text):
+        """Forward a didOpen notification with client-provided text.
+
+        Unlike ensure_file_open (which reads from disk), this uses the
+        text content provided by the LSP proxy client.
+        """
+        if uri in self._open_files:
+            return
+
+        event = self._opening_files.get(uri)
+        if event is not None:
+            await event.wait()
+            return
+
+        event = asyncio.Event()
+        self._opening_files[uri] = event
+        try:
+            params = {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": language_id,
+                    "version": version,
+                    "text": text,
+                }
+            }
+            await self._send_notification(
+                "textDocument/didOpen", params)
+            self._open_files.add(uri)
+        finally:
+            self._opening_files.pop(uri, None)
+            event.set()
 
     def get_diagnostics(self, uri):
         """Return cached diagnostics for a URI."""

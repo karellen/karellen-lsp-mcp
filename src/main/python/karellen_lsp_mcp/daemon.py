@@ -190,6 +190,16 @@ class _FrontendSession:
                     "Could not detect language for project: %s"
                     % params["project_path"])
 
+            force = params.get("force", False)
+            regenerate = params.get("regenerate", False)
+            if regenerate:
+                force = True
+                from karellen_lsp_mcp.lsp_adapter import get_adapter
+                adapter = get_adapter(language)
+                if adapter is not None:
+                    adapter.clean_managed_data(
+                        params["project_path"])
+
             project_id = await registry.register(
                 project_path=params["project_path"],
                 language=language,
@@ -197,7 +207,7 @@ class _FrontendSession:
                 build_info=build_info,
                 init_options=init_options,
                 detection_details=detection_details,
-                force=params.get("force", False),
+                force=force,
             )
             self.registered_projects.add(project_id)
             return {"project_id": project_id}
@@ -237,6 +247,16 @@ class _FrontendSession:
             entry = registry.get_client(project_id)
             return entry.client.get_indexing_status()
 
+        elif method == "lsp_proxy":
+            return await self._handle_lsp_proxy(params)
+
+        elif method == "lsp_proxy_workspace_symbols":
+            return await self._handle_lsp_proxy_workspace_symbols(
+                params)
+
+        elif method == "lsp_proxy_did_open":
+            return await self._handle_lsp_proxy_did_open(params)
+
         elif method.startswith("lsp_"):
             return await self._handle_lsp_request(method, params)
 
@@ -250,6 +270,44 @@ class _FrontendSession:
         "lsp_read_type_definition",
         "lsp_hover", "lsp_document_symbols",
     })
+
+    @staticmethod
+    async def _await_readiness(client, is_single_file,
+                               ready_timeout):
+        """Wait for LSP server readiness. Single-file queries wait
+        only for initialization; cross-file queries wait for full
+        indexing with dynamic timeout extension."""
+        if is_single_file:
+            if client.state == ServerState.STARTING:
+                initialized = await client.wait_initialized(
+                    timeout=ready_timeout)
+                if not initialized:
+                    raise LspClientError(
+                        "LSP server not initialized after %ds "
+                        "(state: %s)"
+                        % (ready_timeout, client.state_name))
+        else:
+            if client.state != ServerState.READY:
+                est = client.estimated_remaining_seconds()
+                if est is not None:
+                    timeout = max(ready_timeout, est + 30)
+                else:
+                    timeout = ready_timeout
+                ready = await client.wait_ready(timeout=timeout)
+                if not ready:
+                    status = client.get_indexing_status()
+                    pct_parts = []
+                    for task in status.get("active_tasks", []):
+                        if task.get("percentage") is not None:
+                            pct_parts.append(
+                                "%d%%" % task["percentage"])
+                    pct_str = (", ".join(pct_parts)
+                               ) if pct_parts else "unknown"
+                    raise LspClientError(
+                        "LSP server not ready after %ds "
+                        "(state: %s, progress: %s)"
+                        % (int(timeout), client.state_name,
+                           pct_str))
 
     # MCP tool name -> LSP method for feature support checks
     _LSP_METHOD_MAP = {
@@ -298,39 +356,9 @@ class _FrontendSession:
 
     async def _dispatch_lsp(self, method, params, client, normalizer,
                             registry, project_id, ready_timeout):
-        if method in self._SINGLE_FILE_METHODS:
-            # Single-file queries work from the AST built on didOpen —
-            # only need the server to finish the initialize handshake,
-            # not background indexing.
-            if client.state == ServerState.STARTING:
-                initialized = await client.wait_initialized(
-                    timeout=ready_timeout)
-                if not initialized:
-                    raise LspClientError(
-                        "LSP server not initialized after %ds (state: %s)"
-                        % (ready_timeout, client.state_name))
-        else:
-            # Cross-file queries need the background index.
-            # Use estimated remaining time for a dynamic timeout.
-            if client.state != ServerState.READY:
-                est = client.estimated_remaining_seconds()
-                if est is not None:
-                    timeout = max(ready_timeout, est + 30)
-                else:
-                    timeout = ready_timeout
-                ready = await client.wait_ready(timeout=timeout)
-                if not ready:
-                    status = client.get_indexing_status()
-                    pct_parts = []
-                    for task in status.get("active_tasks", []):
-                        if task.get("percentage") is not None:
-                            pct_parts.append("%d%%" % task["percentage"])
-                    pct_str = (", ".join(pct_parts)) if pct_parts else "unknown"
-                    raise LspClientError(
-                        "LSP server not ready after %ds "
-                        "(state: %s, progress: %s)"
-                        % (int(timeout), client.state_name, pct_str))
-
+        await self._await_readiness(
+            client, method in self._SINGLE_FILE_METHODS,
+            ready_timeout)
         indexing = client.state == ServerState.INDEXING
 
         if method in ("lsp_read_definition", "lsp_read_declaration",
@@ -462,6 +490,216 @@ class _FrontendSession:
         else:
             raise ProjectRegistryError("Unknown LSP method: %s" % method)
 
+    # LSP methods that only need initialization (not full indexing)
+    # for the proxy path — uses native LSP method names.
+    _PROXY_SINGLE_FILE_METHODS = frozenset({
+        "textDocument/definition", "textDocument/declaration",
+        "textDocument/typeDefinition",
+        "textDocument/hover", "textDocument/documentSymbol",
+    })
+
+    async def _handle_lsp_proxy(self, params):
+        """Forward a raw LSP request via typed LspClient methods.
+
+        Reuses normalizer retry, readiness waiting, position fallback,
+        and URI normalization — same infrastructure as the MCP path.
+        Returns raw LSP JSON with normalized URIs.
+        """
+        registry = self.daemon.registry
+        lsp_method = params["method"]
+        lsp_params = params["params"]
+        file_uri = params.get("file_uri")
+
+        # Resolve project: by explicit project_id or by file path
+        project_id = params.get("project_id")
+        if project_id:
+            entry = registry.get_client(project_id)
+        elif file_uri:
+            file_path = urllib.parse.unquote(
+                file_uri.removeprefix("file://"))
+            entry = registry.find_project_for_file(file_path)
+        else:
+            raise LspClientError(
+                "lsp_proxy requires project_id or file_uri")
+        client = entry.client
+        normalizer = client.normalizer
+
+        # Feature support check (reuse normalizer)
+        if not client.supports_method(lsp_method):
+            raise LspClientError(
+                "This LSP server does not support %s" % lsp_method)
+
+        ready_timeout = params.get("timeout", self.daemon.ready_timeout)
+
+        token = None
+        if "timeout" in params:
+            token = request_timeout_override.set(ready_timeout)
+
+        try:
+            await self._await_readiness(
+                client,
+                lsp_method in self._PROXY_SINGLE_FILE_METHODS,
+                ready_timeout)
+
+            if file_uri:
+                await client.ensure_file_open(file_uri)
+
+            # Denormalize incoming params (reverse previously
+            # normalized URIs so the backend recognizes them).
+            normalizer.denormalize_params(lsp_params)
+
+            # Dispatch to typed LspClient methods (retry via normalizer)
+            result = await self._proxy_dispatch(
+                client, lsp_method, lsp_params, file_uri)
+
+            # Normalize URIs in response. The normalizer records
+            # reverse mappings internally for future denormalization.
+            normalizer.normalize_response(result)
+            return result
+        finally:
+            if token is not None:
+                request_timeout_override.reset(token)
+
+    async def _proxy_dispatch(self, client, method, params,
+                              file_uri):
+        """Route to typed LspClient methods with fallback."""
+        if method in ("textDocument/definition",
+                      "textDocument/declaration",
+                      "textDocument/typeDefinition"):
+            pos = params["position"]
+            fn = {
+                "textDocument/definition": client.definition,
+                "textDocument/declaration": client.declaration,
+                "textDocument/typeDefinition": client.type_definition,
+            }[method]
+            return await fn(
+                file_uri, pos["line"], pos["character"])
+
+        elif method == "textDocument/implementation":
+            pos = params["position"]
+            return await _query_with_fallback(
+                client, file_uri,
+                pos["line"], pos["character"],
+                client.implementation)
+
+        elif method == "textDocument/references":
+            pos = params["position"]
+            include_decl = params.get(
+                "context", {}).get("includeDeclaration", True)
+
+            async def _refs(uri, ln, ch):
+                return await client.references(
+                    uri, ln, ch, include_decl)
+
+            return await _query_with_fallback(
+                client, file_uri,
+                pos["line"], pos["character"], _refs)
+
+        elif method == "textDocument/hover":
+            pos = params["position"]
+            return await client.hover(
+                file_uri, pos["line"], pos["character"])
+
+        elif method == "textDocument/documentSymbol":
+            return await client.document_symbols(file_uri)
+
+        elif method == "workspace/symbol":
+            return await client.workspace_symbol(
+                params.get("query", ""))
+
+        elif method == "textDocument/prepareCallHierarchy":
+            pos = params["position"]
+            items = await client.prepare_call_hierarchy(
+                file_uri, pos["line"], pos["character"])
+            if not items and client.needs_position_fallback:
+                positions = await _resolve_positions(
+                    client, file_uri,
+                    pos["line"], pos["character"])
+                for uri, ln, ch in positions[1:]:
+                    try:
+                        alt = await client.prepare_call_hierarchy(
+                            uri, ln, ch)
+                    except Exception:
+                        continue
+                    if alt:
+                        items = alt
+                        break
+            return items
+
+        elif method == "callHierarchy/incomingCalls":
+            return await client.incoming_calls(params["item"])
+
+        elif method == "callHierarchy/outgoingCalls":
+            return await client.outgoing_calls(params["item"])
+
+        elif method == "textDocument/prepareTypeHierarchy":
+            pos = params["position"]
+            return await client.prepare_type_hierarchy(
+                file_uri, pos["line"], pos["character"])
+
+        elif method == "typeHierarchy/supertypes":
+            return await client.supertypes(params["item"])
+
+        elif method == "typeHierarchy/subtypes":
+            return await client.subtypes(params["item"])
+
+        else:
+            raise LspClientError(
+                "Unknown proxy method: %s" % method)
+
+    async def _handle_lsp_proxy_workspace_symbols(self, params):
+        """Query workspace/symbol across all projects under root_path."""
+        registry = self.daemon.registry
+        root_path = params["root_path"]
+        query = params.get("query", "")
+        entries = [e for e in
+                   registry.find_projects_under_path(root_path)
+                   if e.client is not None]
+
+        async def _query_one(entry):
+            try:
+                result = await entry.client.workspace_symbol(query)
+                if isinstance(result, list):
+                    entry.client.normalizer.normalize_response(
+                        result)
+                    return result
+            except Exception:
+                logger.debug("workspace/symbol failed for %s",
+                             entry.project_id, exc_info=True)
+            return []
+
+        results = await asyncio.gather(
+            *[_query_one(e) for e in entries])
+        all_results = []
+        for r in results:
+            all_results.extend(r)
+        return all_results
+
+    async def _handle_lsp_proxy_did_open(self, params):
+        """Forward a textDocument/didOpen from the LSP proxy client."""
+        registry = self.daemon.registry
+        file_uri = params["uri"]
+        file_path = urllib.parse.unquote(
+            file_uri.removeprefix("file://"))
+
+        try:
+            entry = registry.find_project_for_file(file_path)
+        except ProjectRegistryError:
+            logger.debug("No project for didOpen: %s", file_path)
+            return {}
+
+        client = entry.client
+        if client is None:
+            return {}
+
+        if client.state == ServerState.STARTING:
+            await client.wait_initialized(timeout=60)
+
+        await client.proxy_did_open(
+            params["uri"], params["language_id"],
+            params["version"], params["text"])
+        return {}
+
     async def _cleanup(self):
         """Deregister all projects this frontend registered."""
         registry = self.daemon.registry
@@ -477,6 +715,7 @@ class _FrontendSession:
 # ---------------------------------------------------------------------------
 # LSP result parsers — convert raw LSP JSON to structured dicts
 # ---------------------------------------------------------------------------
+
 
 def _uri_to_path(uri, normalizer=None):
     if normalizer:
@@ -1142,8 +1381,9 @@ def main():
     log_dir = _get_log_dir()
     os.makedirs(log_dir, exist_ok=True)
     log_path = _get_log_path()
+    log_level = os.environ.get("LSP_MCP_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level, logging.INFO),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         filename=log_path,
     )

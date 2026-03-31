@@ -1,0 +1,21 @@
+{
+  "karellen-lsp": {
+    "command": "karellen-lsp",
+    "extensionToLanguage": {
+      ".c": "c",
+      ".h": "c",
+      ".cc": "cpp",
+      ".cpp": "cpp",
+      ".cxx": "cpp",
+      ".hh": "cpp",
+      ".hpp": "cpp",
+      ".hxx": "cpp",
+      ".C": "cpp",
+      ".H": "cpp",
+      ".java": "java",
+      ".kt": "kotlin",
+      ".kts": "kotlin"
+    },
+    "startupTimeout": 120000
+  }
+}

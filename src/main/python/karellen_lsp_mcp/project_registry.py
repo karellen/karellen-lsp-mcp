@@ -112,9 +112,19 @@ class ProjectRegistry:
             self._projects[project_id] = entry
 
             try:
+                # Log dir: use adapter's managed directory if available
+                log_dir = None
+                if adapter is not None and adapter.managed_dir_name:
+                    from karellen_lsp_mcp.lsp_adapter import (
+                        _project_managed_dir)
+                    log_dir = _project_managed_dir(
+                        real_path, adapter.managed_dir_name)
+
                 client = LspClient(request_timeout=self._request_timeout,
                                    ready_timeout=self._ready_timeout)
-                await client.start(cmd, root_uri, init_options=init_options)
+                await client.start(cmd, root_uri,
+                                   init_options=init_options,
+                                   log_dir=log_dir)
                 entry.client = client
                 entry.status = client.state_name
                 entry.refcount = 1
@@ -198,3 +208,63 @@ class ProjectRegistry:
             )
 
         return "file://%s" % urllib.parse.quote(real_file, safe="/:@")
+
+    def find_project_for_file(self, file_path):
+        """Find the project that owns a file path.
+
+        Matches the file against all registered project paths using
+        longest-prefix matching. When multiple projects share the
+        same path (polyglot), uses the file extension to pick the
+        right language backend.
+
+        Returns a _ProjectEntry, or raises ProjectRegistryError.
+        """
+        from pathlib import Path as _Path
+
+        real_file = os.path.realpath(file_path)
+        best_path = None
+        best_entries = []
+
+        for entry in self._projects.values():
+            project_path = entry.path
+            if (real_file.startswith(project_path + os.sep)
+                    or real_file == project_path):
+                if best_path is None or len(project_path) > len(
+                        best_path):
+                    best_path = project_path
+                    best_entries = [entry]
+                elif len(project_path) == len(best_path):
+                    best_entries.append(entry)
+
+        if not best_entries:
+            raise ProjectRegistryError(
+                "No registered project for %s" % file_path)
+
+        if len(best_entries) == 1:
+            return best_entries[0]
+
+        # Multiple backends under same path — disambiguate by extension
+        ext = _Path(real_file).suffix.lower()
+        from karellen_lsp_mcp.lsp_client import EXT_TO_LANGUAGE
+        lang = EXT_TO_LANGUAGE.get(ext)
+        if lang:
+            canonical = canonicalize_language(lang)
+            for entry in best_entries:
+                if entry.language == canonical:
+                    return entry
+
+        # Fall back to first
+        return best_entries[0]
+
+    def find_projects_under_path(self, root_path):
+        """Find all projects whose path is under root_path.
+
+        Returns a list of _ProjectEntry (may be empty).
+        """
+        real_root = os.path.realpath(root_path)
+        results = []
+        for entry in self._projects.values():
+            if (entry.path.startswith(real_root + os.sep)
+                    or entry.path == real_root):
+                results.append(entry)
+        return results
