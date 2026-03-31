@@ -1,0 +1,16 @@
+name: Notify Plugin Marketplace
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger marketplace version update
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh api repos/karellen/claude-plugins/dispatches \
+            -f event_type=update-plugin-versions

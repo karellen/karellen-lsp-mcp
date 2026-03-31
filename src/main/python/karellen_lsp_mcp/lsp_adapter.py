@@ -367,8 +367,18 @@ class ClangdAdapter(LspAdapter):
                     continue
                 return self._copy_to_managed(build_dir, managed_dir)
 
-        # Create out-of-tree build under managed dir
+        # Check if managed dir already has a fresh compile_commands.json
         build_dir = os.path.join(managed_dir, "cmake-build")
+        cc_path = os.path.join(build_dir, "compile_commands.json")
+        if os.path.isfile(cc_path):
+            if not _is_compile_commands_stale(cc_path, project_path):
+                logger.info("Fresh compile_commands.json in managed dir %s, "
+                            "reusing", build_dir)
+                return build_dir
+            logger.info("Stale compile_commands.json in managed dir %s, "
+                        "regenerating", build_dir)
+
+        # Create out-of-tree build under managed dir
         cmake_args = [
             "cmake",
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
@@ -413,7 +423,12 @@ class ClangdAdapter(LspAdapter):
         build_dir = os.path.join(managed_dir, "meson-build")
         cc_path = os.path.join(build_dir, "compile_commands.json")
         if os.path.isfile(cc_path):
-            return build_dir
+            if not _is_compile_commands_stale(cc_path, project_path):
+                logger.info("Fresh compile_commands.json in managed dir %s, "
+                            "reusing", build_dir)
+                return build_dir
+            logger.info("Stale compile_commands.json in managed dir %s, "
+                        "regenerating", build_dir)
 
         try:
             meson_args = ["meson", "setup", build_dir, project_path]

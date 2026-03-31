@@ -12,12 +12,19 @@
 
 ## Overview
 
-`karellen-lsp-mcp` is an [MCP](https://modelcontextprotocol.io/) (Model Context Protocol)
-server that gives any MCP-compliant LLM client structured code intelligence via
+`karellen-lsp-mcp` gives LLM clients structured code intelligence via
 [LSP](https://microsoft.github.io/language-server-protocol/) (Language Server Protocol)
 servers. Instead of reading through entire codebases, the LLM can query definitions,
 references, call hierarchies, type hierarchies, hover documentation, symbols, and
 diagnostics — the same information a human developer gets from their IDE.
+
+Two interfaces, one daemon:
+
+- **MCP interface** (`karellen-lsp-mcp`): Explicit tool calls with structured responses.
+  Requires MCP tool approval or allow-rules.
+- **LSP proxy interface** (`karellen-lsp`): Native LSP server that Claude Code uses
+  transparently — no permission prompts, no manual project registration. Auto-detects
+  languages and routes to backend LSP servers.
 
 ### Architecture
 
@@ -25,29 +32,32 @@ Multiple Claude sessions share a single daemon process and a single LSP server p
 avoiding duplicate server instances and redundant indexing:
 
 ```
-Claude Session 1          Claude Session 2
-     │ (stdio)                  │ (stdio)
-     ▼                          ▼
-┌─────────────┐          ┌─────────────┐
-│  MCP stdio  │          │  MCP stdio  │
-│  frontend   │          │  frontend   │
-└──────┬──────┘          └──────┬──────┘
-       │ (Unix socket)          │ (Unix socket)
-       ▼                        ▼
-┌──────────────────────────────────────┐
-│     karellen-lsp-mcp daemon          │
-│                                      │
-│  Project Registry (refcounted)       │
-│    project-A  refcount=2  ──► clangd │
-│    project-B  refcount=1  ──► clangd │
-└──────────────────────────────────────┘
+Claude Code LSP           Claude MCP Session 1      Claude MCP Session 2
+     │ (stdio)                  │ (stdio)                  │ (stdio)
+     ▼                          ▼                          ▼
+┌─────────────┐          ┌─────────────┐          ┌─────────────┐
+│  LSP proxy  │          │  MCP stdio  │          │  MCP stdio  │
+│  frontend   │          │  frontend   │          │  frontend   │
+└──────┬──────┘          └──────┬──────┘          └──────┬──────┘
+       │ (Unix socket)          │                        │
+       ▼                        ▼                        ▼
+┌──────────────────────────────────────────────────────────────┐
+│     karellen-lsp-mcp daemon                                  │
+│                                                              │
+│  Project Registry (refcounted)                               │
+│    project-A  refcount=3  ──► clangd                         │
+│    project-B  refcount=1  ──► jdtls                          │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 - **Daemon**: Persistent process, owns all LSP server subprocesses and the project
   registry. Listens on Unix domain socket. User-scoped. Auto-starts when the first
-  MCP frontend connects, auto-exits after idle timeout with no connections.
+  frontend connects, auto-exits after idle timeout with no connections.
 - **MCP frontend**: Thin stdio process per Claude session. Connects to daemon, proxies
   MCP tool calls. Returns structured data (dataclasses) for fast LLM processing.
+- **LSP proxy frontend**: Standard LSP server over stdio. Auto-detects languages on
+  `initialize`, registers projects, routes LSP requests to the correct backend.
+  Reuses the same adapters, normalizers, and readiness tracking as MCP.
 
 ### Supported Languages
 
@@ -91,9 +101,18 @@ pipx install 'karellen-lsp-mcp[all]'
 
 ### Plugin Installation (Recommended)
 
-The plugin provides MCP tools, hooks (prerequisite checks, compiler error detection),
-skills (`/karellen-lsp-mcp:lsp-register`, `/karellen-lsp-mcp:lsp-investigate`), and
-an autonomous `lsp-investigator` agent.
+The plugin provides both interfaces in one package:
+
+- **Native LSP server** (`karellen-lsp`): Transparent code intelligence — Claude Code uses
+  it automatically for supported file types. No permission prompts, no manual registration.
+  Auto-detects languages from CWD and routes to backend LSP servers.
+- **MCP tools** (`karellen-lsp-mcp`): Explicit tool calls with structured responses, plus
+  hooks (prerequisite checks, compiler error detection),
+  skills (`/karellen-lsp-mcp:lsp-register`, `/karellen-lsp-mcp:lsp-investigate`), and
+  an autonomous `lsp-investigator` agent.
+
+Both share the same daemon — MCP-registered projects are visible to native LSP queries
+and vice versa.
 
 **From Karellen marketplace:**
 
@@ -152,10 +171,12 @@ or manually:
 
 Note: manual MCP configuration provides tools only, without hooks, skills, or agents.
 
-### Auto-approve LSP tools
+### Auto-approve MCP tools
 
-By default Claude Code will prompt for confirmation before each `lsp_*` tool call. To
-auto-approve all tools from this server, add a permission rule to your user settings
+The native LSP interface requires no approval — Claude Code uses it transparently.
+
+For MCP tools, Claude Code prompts for confirmation by default. To auto-approve, add
+a permission rule to your user settings
 (`~/.claude/settings.json`):
 
 ```json
@@ -269,7 +290,7 @@ lsp_register_project(
 |------|-------------|
 | `lsp_scan_languages` | Scan project for file extensions and recommend LSP registrations. Lightweight alternative to detect. |
 | `lsp_detect_project` | Detect languages and build systems without registering. Analyzes build markers, IDE metadata, source conventions. |
-| `lsp_register_project` | Register a project for LSP analysis. Returns a project_id. Multiple sessions sharing the same project get the same LSP server. |
+| `lsp_register_project` | Register a project for LSP analysis. Returns a project_id. Multiple sessions sharing the same project get the same LSP server. Use `regenerate=True` to clean managed data and force-restart. |
 | `lsp_regenerate_index` | Clean managed data (compilation databases, workspace caches) and force-restart the LSP server. |
 | `lsp_deregister_project` | Deregister a project. Decrements refcount; stops LSP server at 0. |
 | `lsp_list_projects` | List all registered projects with status, refcounts, and paths. |
@@ -422,6 +443,7 @@ Default timeouts: 30s for lifecycle tools (scan, detect, deregister, list, index
 | `LSP_MCP_REQUEST_TIMEOUT` | 60 | Max seconds to wait for a single LSP JSON-RPC response |
 | `LSP_MCP_CLIENT_TIMEOUT` | 180 | Max seconds for the MCP frontend to wait for a daemon response (must exceed ready + request timeouts) |
 | `LSP_MCP_IDLE_TIMEOUT` | 300 | Seconds before the daemon auto-exits when idle (no connections, no projects) |
+| `LSP_MCP_LOG_LEVEL` | `INFO` | Log verbosity for daemon and LSP proxy. Values: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 For large codebases (e.g. LLVM, Linux kernel), cross-file query timeouts extend
 automatically as long as indexing is making progress. Single-file queries (definition,
@@ -530,6 +552,26 @@ before full indexing finished), the response includes an `indexing: true` flag �
 may be incomplete. Use `lsp_indexing_status` to check progress, or re-query later.
 Single-file queries (definition, hover, document symbols) always work immediately.
 
+### Debugging
+
+Set `LSP_MCP_LOG_LEVEL` to control log verbosity for both the LSP proxy and the daemon.
+Values: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`.
+
+**LSP proxy logs** go to stderr. When launched by Claude Code, use `claude --debug` to
+see LSP server output. For standalone testing:
+
+```bash
+LSP_MCP_LOG_LEVEL=DEBUG karellen-lsp 2>lsp-debug.log
+```
+
+**Daemon logs** are written to `daemon.log` (see table above for location). To enable
+debug logging, kill the daemon and restart with the env var set:
+
+```bash
+pkill -f "karellen_lsp_mcp.daemon"
+LSP_MCP_LOG_LEVEL=DEBUG karellen-lsp-mcp  # daemon auto-starts with debug level
+```
+
 ### Stale daemon
 
 If you update `karellen-lsp-mcp` to a new version, the running daemon may still be the
@@ -539,7 +581,7 @@ old version. Kill the daemon to force a restart:
 pkill -f "karellen_lsp_mcp.daemon"
 ```
 
-The next MCP tool call will auto-start the new version.
+The next MCP tool call or LSP query will auto-start the new version.
 
 ## License
 

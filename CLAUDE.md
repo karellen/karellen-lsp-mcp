@@ -21,6 +21,7 @@ Dependencies: `mcp`, `lsprotocol`, `filelock`, `platformdirs`
 ```
 src/main/python/karellen_lsp_mcp/
   server.py            # MCP stdio frontend (entry point: main())
+  lsp_server.py        # LSP proxy frontend (entry point: main()) — polyglot LSP proxy
   daemon.py            # Persistent daemon, owns LSP servers and project registry
   daemon_client.py     # Async client connecting frontends to daemon via Unix socket
   lsp_client.py        # Async wrapper around a single LSP server subprocess (JSON-RPC 2.0)
@@ -49,7 +50,9 @@ src/unittest/python/       # Unit tests (mocked, no external deps)
 src/integrationtest/python/ # Integration tests (need clangd)
 ```
 
-Console script: `karellen-lsp-mcp` → `karellen_lsp_mcp.server:main`
+Console scripts:
+- `karellen-lsp-mcp` → `karellen_lsp_mcp.server:main` (MCP frontend)
+- `karellen-lsp` → `karellen_lsp_mcp.lsp_server:main` (LSP proxy frontend)
 
 ## Key Design Details
 
@@ -60,11 +63,17 @@ Console script: `karellen-lsp-mcp` → `karellen_lsp_mcp.server:main`
   wait for indexing with progress-driven dynamic timeout extension.
 - **Refcounting**: Multiple sessions registering the same project (path + language) share
   one LSP server instance. Server stops when refcount reaches 0.
+- **LSP proxy routing**: File-to-project routing lives in `ProjectRegistry.find_project_for_file()`
+  (longest-prefix path matching with extension disambiguation for polyglot projects).
+  Both MCP and LSP proxy frontends share the same daemon registry — MCP-registered projects
+  are visible to native LSP queries and vice versa.
 - **Normalizers**: Server-specific behavior abstracted via `LspNormalizer` subclasses.
   `ClangdNormalizer` tracks clangd progress and version-based feature support.
   `JdtlsNormalizer` tracks jdtls readiness via three conditions: ServiceReady seen,
   Searching progress seen, and no active progress tokens — preventing premature query
-  dispatch during cold/warm index builds.
+  dispatch during cold/warm index builds. Normalizers also handle response URI normalization
+  (`normalize_response`) and incoming param denormalization (`denormalize_params`) with
+  per-instance reverse URI mapping for hierarchy item roundtripping.
 - **Staleness detection**: `compile_commands.json` is checked for freshness (build config
   mtime, >= 5% dead source references) before use. Stale files trigger regeneration for
   CMake/Meson. Use `lsp_regenerate_index` to force regeneration.
@@ -82,6 +91,19 @@ When making any change to detection, adapters, normalizers, or supported languag
 2. Update `README.md` supported languages table if languages changed
 3. Update plugin manifests, skills, investigator configs, and hooks if applicable
 4. Bump the version in `build.py` if the change affects the public API or tool behavior
+
+## Debugging & Troubleshooting
+
+- **LSP proxy logs**: `karellen-lsp` logs to stderr. When launched by Claude Code,
+  use `claude --debug` to see LSP server output. For standalone testing:
+  ```bash
+  LSP_MCP_LOG_LEVEL=DEBUG karellen-lsp 2>lsp-debug.log
+  ```
+- **Daemon logs**: Written to `~/.local/state/karellen-lsp-mcp/daemon.log`.
+  Set `LSP_MCP_LOG_LEVEL=DEBUG` before the daemon starts for verbose output.
+  Kill the daemon first if it's already running (`pkill -f karellen_lsp_mcp.daemon`).
+- **Log level**: `LSP_MCP_LOG_LEVEL` environment variable controls log verbosity
+  for both the LSP proxy and the daemon. Values: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`.
 
 ## Code Style
 

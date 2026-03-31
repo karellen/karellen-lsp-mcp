@@ -47,6 +47,7 @@ class LspNormalizer:
         self._state = ServerState.STARTING
         self._ready_callback = None
         self._server_version = None
+        self._uri_reverse_map = {}  # normalized → original
 
     @property
     def state(self):
@@ -132,6 +133,16 @@ class LspNormalizer:
         """
         return False
 
+    @property
+    def uri_schemes(self):
+        """Return non-standard URI schemes this normalizer transforms.
+
+        Used by the proxy to find URIs embedded in string values
+        (e.g., markdown hover content). Return an empty tuple if the
+        normalizer only handles structured URI fields.
+        """
+        return ()
+
     def normalize_uri(self, uri):
         """Normalize a server-specific URI to a standard form.
 
@@ -139,6 +150,125 @@ class LspNormalizer:
         (e.g. jdt://) into standard forms (e.g. jar:file://).
         """
         return uri
+
+    def normalize_response(self, result):
+        """Normalize URIs in an LSP JSON response.
+
+        Walks the response structure and normalizes both structured
+        URI fields ('uri', 'targetUri') and URIs embedded in string
+        values (e.g., jdt:// links in hover markdown).
+
+        Records normalized → original mappings in the internal
+        reverse map for subsequent denormalization of incoming params.
+        """
+        if result is None:
+            return result
+        scan_strings = bool(self.uri_schemes)
+        self._normalize_response_walk(result, scan_strings)
+        return result
+
+    def _normalize_response_walk(self, result, scan_strings):
+        if isinstance(result, list):
+            for i, item in enumerate(result):
+                if isinstance(item, str) and scan_strings:
+                    result[i] = self._normalize_uris_in_string(item)
+                elif isinstance(item, (dict, list)):
+                    self._normalize_response_walk(
+                        item, scan_strings)
+        elif isinstance(result, dict):
+            for key in ("uri", "targetUri"):
+                if key in result and isinstance(result[key], str):
+                    original = result[key]
+                    normalized = self.normalize_uri(original)
+                    if normalized != original:
+                        result[key] = normalized
+                        self._record_reverse(normalized, original)
+            for key, v in result.items():
+                if key in ("uri", "targetUri"):
+                    continue
+                if isinstance(v, str) and scan_strings:
+                    result[key] = self._normalize_uris_in_string(v)
+                elif isinstance(v, (dict, list)):
+                    self._normalize_response_walk(
+                        v, scan_strings)
+
+    def _record_reverse(self, normalized, original):
+        """Record a reverse URI mapping."""
+        self._uri_reverse_map[normalized] = original
+
+    def denormalize_params(self, params):
+        """Reverse-map normalized URIs in incoming request params.
+
+        Replaces normalized URIs (in structured 'uri' fields and
+        string values) with their originals so the backend server
+        recognizes them. Used for hierarchy item roundtripping.
+        """
+        if not self._uri_reverse_map or params is None:
+            return params
+        if isinstance(params, list):
+            for i, item in enumerate(params):
+                if isinstance(item, str):
+                    params[i] = self._denormalize_uris_in_string(
+                        item)
+                else:
+                    self.denormalize_params(item)
+        elif isinstance(params, dict):
+            for key in ("uri", "targetUri"):
+                if key in params and isinstance(params[key], str):
+                    original = self._uri_reverse_map.get(
+                        params[key])
+                    if original is not None:
+                        params[key] = original
+            for key, v in params.items():
+                if key in ("uri", "targetUri"):
+                    continue
+                if isinstance(v, str):
+                    denorm = self._denormalize_uris_in_string(v)
+                    if denorm is not v:
+                        params[key] = denorm
+                elif isinstance(v, (dict, list)):
+                    self.denormalize_params(v)
+        return params
+
+    def _normalize_uris_in_string(self, text):
+        """Replace non-standard URIs embedded in a string value."""
+        pattern = self._get_uri_scheme_re()
+        if pattern is None:
+            return text
+
+        def _replace(match):
+            original = match.group(0)
+            normalized = self.normalize_uri(original)
+            if normalized != original:
+                self._record_reverse(normalized, original)
+                return normalized
+            return original
+        return pattern.sub(_replace, text)
+
+    def _denormalize_uris_in_string(self, text):
+        """Replace normalized URIs in text with originals."""
+        if not self._uri_reverse_map:
+            return text
+        result = text
+        for normalized, original in self._uri_reverse_map.items():
+            if normalized in result:
+                result = result.replace(normalized, original)
+        return result
+
+    _uri_scheme_re_cache = {}
+
+    def _get_uri_scheme_re(self):
+        """Return compiled regex for URI schemes, or None."""
+        schemes = self.uri_schemes
+        if not schemes:
+            return None
+        key = frozenset(schemes)
+        pattern = LspNormalizer._uri_scheme_re_cache.get(key)
+        if pattern is None:
+            alts = "|".join(re.escape(s) for s in schemes)
+            pattern = re.compile(r'(?:%s)://[^\s)\]>]+' % alts)
+            LspNormalizer._uri_scheme_re_cache[key] = pattern
+        return pattern
 
     def supports_method(self, method):
         """Return True if the LSP server supports the given method.
@@ -200,6 +330,7 @@ class ClangdNormalizer(LspNormalizer):
         self._max_retries = max_retries
         self._retry_delay = retry_delay
         self._start_time = None
+        self._ready_time = None
         self._active_progress_tokens = set()
         self._saw_any_progress = False
         self._progress = {}  # token -> {title, message, percentage}
@@ -229,6 +360,7 @@ class ClangdNormalizer(LspNormalizer):
 
     def on_started(self):
         self._start_time = time.monotonic()
+        self._ready_time = None
         self._state = ServerState.INDEXING
 
     def on_stopped(self):
@@ -282,7 +414,12 @@ class ClangdNormalizer(LspNormalizer):
 
     def get_indexing_status(self):
         """Return current indexing status with progress details."""
-        elapsed = time.monotonic() - self._start_time if self._start_time else 0
+        if self._ready_time:
+            elapsed = self._ready_time - self._start_time
+        elif self._start_time:
+            elapsed = time.monotonic() - self._start_time
+        else:
+            elapsed = 0
         active = []
         for token in self._active_progress_tokens:
             entry = self._progress.get(token, {})
@@ -403,7 +540,8 @@ class ClangdNormalizer(LspNormalizer):
 
     def _mark_ready(self):
         if self._state == ServerState.INDEXING:
-            elapsed = time.monotonic() - self._start_time
+            self._ready_time = time.monotonic()
+            elapsed = self._ready_time - self._start_time
             logger.info("LSP server ready after %.1fs", elapsed)
             self._state = ServerState.READY
             if self._ready_callback:
@@ -442,6 +580,7 @@ class JdtlsNormalizer(LspNormalizer):
         self._max_retries = max_retries
         self._retry_delay = retry_delay
         self._start_time = None
+        self._ready_time = None
         self._active_progress_tokens = set()
         self._saw_service_ready = False
         self._saw_searching = False
@@ -450,6 +589,7 @@ class JdtlsNormalizer(LspNormalizer):
 
     def on_started(self):
         self._start_time = time.monotonic()
+        self._ready_time = None
         self._state = ServerState.INDEXING
 
     def on_stopped(self):
@@ -532,8 +672,12 @@ class JdtlsNormalizer(LspNormalizer):
         return self._warmup_timeout
 
     def get_indexing_status(self):
-        elapsed = (time.monotonic() - self._start_time
-                   if self._start_time else 0)
+        if self._ready_time:
+            elapsed = self._ready_time - self._start_time
+        elif self._start_time:
+            elapsed = time.monotonic() - self._start_time
+        else:
+            elapsed = 0
         active = []
         for token in self._active_progress_tokens:
             entry = self._progress.get(token, {})
@@ -567,6 +711,10 @@ class JdtlsNormalizer(LspNormalizer):
                 best = pct
         return best
 
+    @property
+    def uri_schemes(self):
+        return ("jdt",)
+
     def normalize_uri(self, uri):
         if uri and uri.startswith("jdt://"):
             return _jdt_uri_to_jar_uri(uri)
@@ -589,7 +737,8 @@ class JdtlsNormalizer(LspNormalizer):
 
     def _mark_ready(self):
         if self._state == ServerState.INDEXING:
-            elapsed = time.monotonic() - self._start_time
+            self._ready_time = time.monotonic()
+            elapsed = self._ready_time - self._start_time
             logger.info("jdtls ready after %.1fs", elapsed)
             self._state = ServerState.READY
             if self._ready_callback:

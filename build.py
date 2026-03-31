@@ -66,7 +66,10 @@ def set_properties(project):
     project.set_property("distutils_readme_description", True)
     project.set_property("distutils_description_overwrite", True)
     project.set_property("distutils_upload_skip_existing", True)
-    project.set_property("distutils_console_scripts", ["karellen-lsp-mcp = karellen_lsp_mcp.server:main"])
+    project.set_property("distutils_console_scripts", [
+        "karellen-lsp-mcp = karellen_lsp_mcp.server:main",
+        "karellen-lsp = karellen_lsp_mcp.lsp_server:main",
+    ])
     project.set_property("distutils_setup_keywords", ["lsp", "language-server-protocol", "mcp",
                                                        "model-context-protocol", "clangd",
                                                        "code-intelligence"])

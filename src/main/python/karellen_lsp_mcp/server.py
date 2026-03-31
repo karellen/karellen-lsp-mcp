@@ -289,6 +289,7 @@ async def lsp_register_project(project_path: str, language: str = None,
                                lsp_command: list[str] = None,
                                build_info: dict = None,
                                force: bool = False,
+                               regenerate: bool = False,
                                timeout: int = 120) -> RegisterResult:
     """Register a project for LSP analysis. Returns a project_id for subsequent queries.
 
@@ -303,6 +304,8 @@ async def lsp_register_project(project_path: str, language: str = None,
         build_info: Optional build configuration dict. For C/C++:
                     compile_commands_dir, build_dir, compiler_flags.
         force: If true, kill any existing LSP server for this project and start fresh.
+        regenerate: If true, clean all managed data (compilation databases, workspace
+                    caches) and force-restart the LSP server. Implies force=True.
         timeout: Maximum seconds to wait for LSP server readiness (default 120).
     """
     result = await _request("register_project", {
@@ -311,6 +314,7 @@ async def lsp_register_project(project_path: str, language: str = None,
         "lsp_command": lsp_command,
         "build_info": build_info,
         "force": force,
+        "regenerate": regenerate,
         "timeout": timeout,
     })
     return RegisterResult(project_id=result["project_id"])
