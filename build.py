@@ -50,8 +50,10 @@ def set_properties(project):
 
     project.depends_on("karellen-clangd", extra="clangd")
     project.depends_on("karellen-jdtls", extra="jdtls")
+    project.depends_on("pyright", extra="pyright")
     project.depends_on("karellen-clangd", extra="all")
     project.depends_on("karellen-jdtls", extra="all")
+    project.depends_on("pyright", extra="all")
 
     project.set_property("integrationtest_inherit_environment", True)
 
@@ -71,7 +73,11 @@ def set_properties(project):
         "karellen-lsp = karellen_lsp_mcp.lsp_server:main",
     ])
     project.set_property("distutils_setup_keywords", ["lsp", "language-server-protocol", "mcp",
-                                                       "model-context-protocol", "clangd",
+                                                       "model-context-protocol",
+                                                       "c", "cpp", "java", "kotlin",
+                                                       "python", "rust",
+                                                       "clangd", "jdtls", "pyright",
+                                                       "rust-analyzer",
                                                        "code-intelligence"])
 
     project.set_property("distutils_classifiers", [

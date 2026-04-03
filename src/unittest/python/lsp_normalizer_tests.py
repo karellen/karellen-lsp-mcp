@@ -13,13 +13,14 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""Unit tests for LspNormalizer, ClangdNormalizer, and JdtlsNormalizer."""
+"""Unit tests for LspNormalizer, ProgressNormalizer, ClangdNormalizer, and JdtlsNormalizer."""
 
 import unittest
 
 from karellen_lsp_mcp.lsp_client import LspClientError
 from karellen_lsp_mcp.lsp_normalizer import (
-    ServerState, LspNormalizer, ClangdNormalizer, JdtlsNormalizer,
+    ServerState, LspNormalizer, ProgressNormalizer,
+    ClangdNormalizer, JdtlsNormalizer,
     create_normalizer, _jdt_uri_to_jar_uri,
 )
 
@@ -34,17 +35,39 @@ class CreateNormalizerTest(unittest.TestCase):
         self.assertIsInstance(normalizer, ClangdNormalizer)
 
     def test_unknown_command(self):
-        normalizer = create_normalizer(["rust-analyzer"])
+        normalizer = create_normalizer(["some-lsp-server"])
         self.assertIsInstance(normalizer, LspNormalizer)
-        self.assertNotIsInstance(normalizer, ClangdNormalizer)
+        self.assertNotIsInstance(normalizer, ProgressNormalizer)
 
     def test_empty_command(self):
         normalizer = create_normalizer([])
         self.assertIsInstance(normalizer, LspNormalizer)
+        self.assertNotIsInstance(normalizer, ProgressNormalizer)
 
     def test_none_command(self):
         normalizer = create_normalizer(None)
         self.assertIsInstance(normalizer, LspNormalizer)
+
+    def test_pyright_langserver_command(self):
+        normalizer = create_normalizer(["pyright-langserver", "--stdio"])
+        self.assertIsInstance(normalizer, ProgressNormalizer)
+        self.assertNotIsInstance(normalizer, ClangdNormalizer)
+
+    def test_pyright_command(self):
+        normalizer = create_normalizer(["pyright"])
+        self.assertIsInstance(normalizer, ProgressNormalizer)
+
+    def test_pyright_via_node_with_label(self):
+        normalizer = create_normalizer(
+            ["node", "/path/to/langserver.index.js", "--", "--stdio"],
+            server_label="pyright")
+        self.assertIsInstance(normalizer, ProgressNormalizer)
+        self.assertNotIsInstance(normalizer, ClangdNormalizer)
+
+    def test_rust_analyzer_command(self):
+        normalizer = create_normalizer(["rust-analyzer"])
+        self.assertIsInstance(normalizer, ProgressNormalizer)
+        self.assertNotIsInstance(normalizer, ClangdNormalizer)
 
     def test_jdtls_command(self):
         normalizer = create_normalizer(["jdtls"])
@@ -93,6 +116,113 @@ class LspNormalizerBaseTest(unittest.TestCase):
     def test_retry_delay_is_zero(self):
         n = LspNormalizer()
         self.assertEqual(n.retry_delay, 0)
+
+
+class ProgressNormalizerStateTest(unittest.TestCase):
+    def test_initial_state(self):
+        n = ProgressNormalizer()
+        self.assertEqual(n.state, ServerState.STARTING)
+
+    def test_on_started_transitions_to_indexing(self):
+        n = ProgressNormalizer()
+        n.on_started()
+        self.assertEqual(n.state, ServerState.INDEXING)
+
+    def test_on_stopped(self):
+        n = ProgressNormalizer()
+        n.on_started()
+        n.on_stopped()
+        self.assertEqual(n.state, ServerState.STOPPED)
+
+
+class ProgressNormalizerProgressTest(unittest.TestCase):
+    def test_progress_begin_end_transitions_to_ready(self):
+        n = ProgressNormalizer()
+        ready_called = []
+        n.set_ready_callback(lambda: ready_called.append(True))
+        n.on_started()
+
+        n.on_notification("$/progress", {
+            "token": "indexing",
+            "value": {"kind": "begin", "title": "Indexing"}
+        })
+        self.assertEqual(n.state, ServerState.INDEXING)
+
+        n.on_notification("$/progress", {
+            "token": "indexing",
+            "value": {"kind": "end", "message": "done"}
+        })
+        self.assertEqual(n.state, ServerState.READY)
+        self.assertEqual(len(ready_called), 1)
+
+    def test_multiple_progress_tokens(self):
+        n = ProgressNormalizer()
+        n.on_started()
+
+        n.on_notification("$/progress", {
+            "token": "t1",
+            "value": {"kind": "begin", "title": "Task 1"}
+        })
+        n.on_notification("$/progress", {
+            "token": "t2",
+            "value": {"kind": "begin", "title": "Task 2"}
+        })
+        n.on_notification("$/progress", {
+            "token": "t1",
+            "value": {"kind": "end", "message": "done"}
+        })
+        self.assertEqual(n.state, ServerState.INDEXING)
+        n.on_notification("$/progress", {
+            "token": "t2",
+            "value": {"kind": "end", "message": "done"}
+        })
+        self.assertEqual(n.state, ServerState.READY)
+
+    def test_no_progress_timeout_marks_ready(self):
+        n = ProgressNormalizer()
+        n.on_started()
+        n.on_no_progress_timeout()
+        self.assertEqual(n.state, ServerState.READY)
+
+    def test_no_progress_timeout_noop_if_progress_seen(self):
+        n = ProgressNormalizer()
+        n.on_started()
+        n.on_notification("$/progress", {
+            "token": "t1",
+            "value": {"kind": "begin", "title": "Indexing"}
+        })
+        n.on_no_progress_timeout()
+        self.assertEqual(n.state, ServerState.INDEXING)
+
+    def test_warmup_timeout_forces_ready(self):
+        """ProgressNormalizer forces ready on warmup timeout even with active progress."""
+        n = ProgressNormalizer()
+        n.on_started()
+        n.on_notification("$/progress", {
+            "token": "t1",
+            "value": {"kind": "begin", "title": "Indexing"}
+        })
+        n.on_warmup_timeout()
+        self.assertEqual(n.state, ServerState.READY)
+
+    def test_max_retries_during_indexing(self):
+        n = ProgressNormalizer(max_retries=5)
+        n.on_started()
+        self.assertEqual(n.max_retries, 5)
+
+    def test_max_retries_when_ready(self):
+        n = ProgressNormalizer(max_retries=5)
+        n.on_started()
+        n.on_no_progress_timeout()
+        self.assertEqual(n.max_retries, 1)
+
+    def test_is_not_transient_error(self):
+        n = ProgressNormalizer()
+        self.assertFalse(n.is_transient_error("some error"))
+
+    def test_clangd_inherits_progress_normalizer(self):
+        n = ClangdNormalizer()
+        self.assertIsInstance(n, ProgressNormalizer)
 
 
 class ClangdNormalizerStateTest(unittest.TestCase):

@@ -154,6 +154,10 @@ def _read_jetbrains_metadata(project_path):
         meta = IdeMetadata(ide="jetbrains", tier=TIER_IDE_PROJECT)
         for comp in root.iter("component"):
             if comp.get("name") == "ProjectRootManager":
+                sdk_type = comp.get("project-jdk-type", "")
+                if sdk_type and "java" not in sdk_type.lower() \
+                        and "jdk" not in sdk_type.lower():
+                    break
                 sdk_name = comp.get("project-jdk-name")
                 meta.java_sdk = sdk_name
                 # Resolve SDK name to actual JDK path
@@ -923,9 +927,508 @@ class CppDetector(ProjectDetector):
         )]
 
 
+# ---------------------------------------------------------------------------
+# Python Detector
+# ---------------------------------------------------------------------------
+
+# TOML parsing: stdlib in 3.11+, optional tomli backport for 3.10
+try:
+    import tomllib as _tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as _tomllib
+    except ModuleNotFoundError:
+        _tomllib = None
+
+import configparser as _configparser
+
+_PYPROJECT_TOML = "pyproject.toml"
+_SETUP_PY = "setup.py"
+_SETUP_CFG = "setup.cfg"
+_PIPFILE = "Pipfile"
+_REQUIREMENTS_TXT = "requirements.txt"
+_PYRIGHTCONFIG = "pyrightconfig.json"
+
+# PyBuilder build.py detection: first non-comment line with pybuilder import
+_PYBUILDER_IMPORT_RE = re.compile(
+    r"^\s*(?:from\s+pybuilder\b|import\s+pybuilder\b)")
+
+# Build backend patterns in pyproject.toml [build-system].requires
+_BUILD_BACKEND_PATTERNS = (
+    ("poetry-core", "poetry"),
+    ("poetry", "poetry"),
+    ("hatchling", "hatch"),
+    ("flit-core", "flit"),
+    ("flit_core", "flit"),
+    ("setuptools", "setuptools"),
+    ("maturin", "maturin"),
+    ("pdm-backend", "pdm"),
+    ("pdm-pep517", "pdm"),
+)
+
+# Common in-project virtualenv directory names
+_VENV_DIR_CANDIDATES = (".venv", "venv", "env")
+
+
+def _is_pybuilder_project(project_path):
+    """Check if build.py contains a pybuilder import."""
+    build_py = os.path.join(project_path, "build.py")
+    if not os.path.isfile(build_py):
+        return False
+    try:
+        with open(build_py, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if _PYBUILDER_IMPORT_RE.match(line):
+                    return True
+                # Only check the first few significant lines
+                if not line.startswith(("from", "import")):
+                    break
+    except OSError:
+        pass
+    return False
+
+
+def _parse_pyproject_toml(project_path):
+    """Parse pyproject.toml and extract detection details.
+
+    Returns a dict with build_backend, python_requires, and tool settings,
+    or None if the file doesn't exist or can't be parsed.
+    """
+    if _tomllib is None:
+        return None
+    toml_path = os.path.join(project_path, _PYPROJECT_TOML)
+    if not os.path.isfile(toml_path):
+        return None
+    try:
+        with open(toml_path, "rb") as f:
+            data = _tomllib.load(f)
+    except (OSError, Exception) as e:
+        logger.debug("Failed to parse %s: %s", toml_path, e)
+        return None
+
+    result = {}
+
+    # Identify build backend from [build-system].requires
+    build_system = data.get("build-system", {})
+    requires = build_system.get("requires", [])
+    if isinstance(requires, list):
+        requires_str = " ".join(str(r) for r in requires).lower()
+        for pattern, backend_name in _BUILD_BACKEND_PATTERNS:
+            if pattern in requires_str:
+                result["build_backend"] = backend_name
+                break
+
+    # [project].requires-python
+    project_section = data.get("project", {})
+    requires_python = project_section.get("requires-python")
+    if requires_python:
+        result["python_requires"] = requires_python
+
+    # [tool.pyright] presence
+    tool = data.get("tool", {})
+    if "pyright" in tool:
+        result["has_pyright_config"] = True
+
+    # [tool.poetry] presence
+    if "poetry" in tool:
+        result["has_poetry"] = True
+
+    return result
+
+
+def _parse_setup_cfg(project_path):
+    """Parse setup.cfg for Python project metadata.
+
+    Returns a dict with python_requires and packages, or None.
+    """
+    cfg_path = os.path.join(project_path, _SETUP_CFG)
+    if not os.path.isfile(cfg_path):
+        return None
+    parser = _configparser.ConfigParser()
+    try:
+        parser.read(cfg_path, encoding="utf-8")
+    except (OSError, _configparser.Error) as e:
+        logger.debug("Failed to parse %s: %s", cfg_path, e)
+        return None
+
+    result = {}
+    if parser.has_option("options", "python_requires"):
+        result["python_requires"] = parser.get("options", "python_requires")
+    if parser.has_option("options", "packages"):
+        result["packages"] = parser.get("options", "packages")
+    return result if result else None
+
+
+def _detect_venv(project_path):
+    """Detect virtual environment for a Python project.
+
+    Returns a dict with venv_path, venv_python, venv_version, and is_conda,
+    or an empty dict if no venv is found.
+
+    Detection order:
+    1. $VIRTUAL_ENV environment variable
+    2. In-project directories (.venv/, venv/, env/) via pyvenv.cfg
+    3. Conda environment via conda-meta/history
+    """
+    result = {}
+
+    # 1. $VIRTUAL_ENV
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env and os.path.isdir(virtual_env):
+        venv_info = _read_pyvenv_cfg(virtual_env)
+        if venv_info:
+            result["venv_path"] = virtual_env
+            result.update(venv_info)
+            return result
+
+    # 2. In-project directories
+    for dirname in _VENV_DIR_CANDIDATES:
+        venv_dir = os.path.join(project_path, dirname)
+        if not os.path.isdir(venv_dir):
+            continue
+
+        # Check for conda first (no pyvenv.cfg)
+        conda_history = os.path.join(venv_dir, "conda-meta", "history")
+        if os.path.isfile(conda_history):
+            result["venv_path"] = venv_dir
+            result["is_conda"] = True
+            # Try to find Python binary
+            python_path = os.path.join(venv_dir, "bin", "python")
+            if os.path.isfile(python_path):
+                result["venv_python"] = python_path
+            return result
+
+        # Standard PEP 405 venv/virtualenv
+        venv_info = _read_pyvenv_cfg(venv_dir)
+        if venv_info:
+            result["venv_path"] = venv_dir
+            result.update(venv_info)
+            return result
+
+    return result
+
+
+def _read_pyvenv_cfg(venv_dir):
+    """Read pyvenv.cfg from a virtual environment directory.
+
+    Returns a dict with venv_python and venv_version, or None if not found.
+    pyvenv.cfg is a simple key = value file (not INI, no sections).
+    """
+    cfg_path = os.path.join(venv_dir, "pyvenv.cfg")
+    if not os.path.isfile(cfg_path):
+        return None
+    result = {}
+    try:
+        with open(cfg_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                if key == "version" and value:
+                    result["venv_version"] = value
+                elif key == "home" and value:
+                    # home points to the directory containing the base Python
+                    python_path = os.path.join(venv_dir, "bin", "python")
+                    if os.path.isfile(python_path):
+                        result["venv_python"] = python_path
+    except OSError as e:
+        logger.debug("Failed to read %s: %s", cfg_path, e)
+        return None
+    return result if result else None
+
+
+def _detect_src_layout(project_path):
+    """Check if project uses src layout (src/ with Python packages)."""
+    src_dir = os.path.join(project_path, "src")
+    if not os.path.isdir(src_dir):
+        return False
+    # Look for Python packages (directories with __init__.py) or .py files
+    for entry in os.listdir(src_dir):
+        entry_path = os.path.join(src_dir, entry)
+        if os.path.isdir(entry_path):
+            if os.path.isfile(os.path.join(entry_path, "__init__.py")):
+                return True
+        elif entry.endswith(".py"):
+            return True
+    return False
+
+
+class PythonDetector(ProjectDetector):
+    """Detects Python projects by build system markers and virtual environments.
+
+    Checks for build system markers in priority order:
+    PyBuilder (build.py), pyproject.toml, setup.py, setup.cfg, Pipfile,
+    requirements.txt. Extracts metadata from parseable config files and
+    detects virtual environments.
+    """
+
+    def detect(self, project_path, ide_metadata):
+        build_system = None
+        confidence = "medium"
+        details = {}
+
+        # PyBuilder: build.py with pybuilder import
+        if _is_pybuilder_project(project_path):
+            build_system = "pybuilder"
+            confidence = "high"
+            # PyBuilder conventional source directory
+            pyb_src = os.path.join(project_path, "src", "main", "python")
+            if os.path.isdir(pyb_src):
+                details["include"] = ["src/main/python"]
+                details["extra_paths"] = ["src/main/python"]
+
+        # pyproject.toml
+        has_pyproject = os.path.isfile(
+            os.path.join(project_path, _PYPROJECT_TOML))
+        if has_pyproject:
+            if build_system is None:
+                build_system = "pyproject"
+                confidence = "high"
+            toml_details = _parse_pyproject_toml(project_path)
+            if toml_details:
+                if "build_backend" in toml_details:
+                    details["build_backend"] = toml_details["build_backend"]
+                    if build_system == "pyproject":
+                        build_system = toml_details["build_backend"]
+                if "python_requires" in toml_details:
+                    details["python_requires"] = toml_details["python_requires"]
+                if toml_details.get("has_pyright_config"):
+                    details["pyrightconfig"] = True
+                if toml_details.get("has_poetry"):
+                    details["has_poetry"] = True
+
+        # setup.py
+        has_setup_py = os.path.isfile(
+            os.path.join(project_path, _SETUP_PY))
+        if has_setup_py:
+            details["has_setup_py"] = True
+            if build_system is None:
+                build_system = "setuptools"
+                confidence = "high"
+
+        # setup.cfg
+        has_setup_cfg = os.path.isfile(
+            os.path.join(project_path, _SETUP_CFG))
+        if has_setup_cfg:
+            cfg_details = _parse_setup_cfg(project_path)
+            if cfg_details:
+                if ("python_requires" not in details
+                        and "python_requires" in cfg_details):
+                    details["python_requires"] = cfg_details["python_requires"]
+            if build_system is None:
+                build_system = "setuptools"
+                confidence = "high"
+
+        # Pipfile
+        has_pipfile = os.path.isfile(
+            os.path.join(project_path, _PIPFILE))
+        if has_pipfile:
+            if build_system is None:
+                build_system = "pipenv"
+                confidence = "medium"
+
+        # requirements.txt
+        has_requirements = os.path.isfile(
+            os.path.join(project_path, _REQUIREMENTS_TXT))
+        if has_requirements:
+            if build_system is None:
+                build_system = "pip"
+                confidence = "medium"
+
+        if build_system is None:
+            return []
+
+        # pyrightconfig.json
+        if os.path.isfile(os.path.join(project_path, _PYRIGHTCONFIG)):
+            details["pyrightconfig"] = True
+
+        # Source layout
+        if _detect_src_layout(project_path):
+            details["src_layout"] = True
+
+        # Virtual environment
+        venv_info = _detect_venv(project_path)
+        if venv_info:
+            details.update(venv_info)
+
+        return [DetectedLanguage(
+            language="python",
+            build_system=build_system,
+            confidence=confidence,
+            details=details if details else None,
+        )]
+
+
+# ---------------------------------------------------------------------------
+# Rust Detector
+# ---------------------------------------------------------------------------
+
+_CARGO_TOML = "Cargo.toml"
+_BUILD_RS = "build.rs"
+_RUST_TOOLCHAIN_TOML = "rust-toolchain.toml"
+_RUST_TOOLCHAIN = "rust-toolchain"
+
+
+def _find_cargo_workspace_root(project_path, max_levels=5):
+    """Walk up from project_path to find the Cargo workspace root.
+
+    A workspace root is a directory whose Cargo.toml contains [workspace].
+    Returns the workspace root if found above project_path, or project_path
+    itself.
+    """
+    current = os.path.dirname(project_path)
+    for _ in range(max_levels):
+        if not current or current == os.path.dirname(current):
+            break
+        cargo_toml = os.path.join(current, _CARGO_TOML)
+        if os.path.isfile(cargo_toml):
+            if _cargo_toml_has_workspace(cargo_toml):
+                return current
+        current = os.path.dirname(current)
+    return project_path
+
+
+def _cargo_toml_has_workspace(cargo_toml_path):
+    """Check if a Cargo.toml has a [workspace] section."""
+    try:
+        with open(cargo_toml_path, "r", encoding="utf-8",
+                  errors="replace") as f:
+            for line in f:
+                if line.strip() == "[workspace]":
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _parse_cargo_toml(project_path):
+    """Parse Cargo.toml and extract detection details.
+
+    Returns a dict with workspace_members, edition, etc.,
+    or None if the file doesn't exist or can't be parsed.
+    """
+    if _tomllib is None:
+        return None
+    cargo_path = os.path.join(project_path, _CARGO_TOML)
+    if not os.path.isfile(cargo_path):
+        return None
+    try:
+        with open(cargo_path, "rb") as f:
+            data = _tomllib.load(f)
+    except (OSError, Exception) as e:
+        logger.debug("Failed to parse %s: %s", cargo_path, e)
+        return None
+
+    result = {}
+
+    # [package].edition
+    package = data.get("package", {})
+    edition = package.get("edition")
+    if edition:
+        result["edition"] = str(edition)
+
+    # [workspace].members
+    workspace = data.get("workspace", {})
+    members = workspace.get("members", [])
+    if isinstance(members, list) and members:
+        # Expand glob patterns
+        import glob as _glob
+        expanded = []
+        for pattern in members:
+            if isinstance(pattern, str):
+                full_pattern = os.path.join(project_path, pattern)
+                matches = _glob.glob(full_pattern)
+                for match in sorted(matches):
+                    if os.path.isdir(match):
+                        expanded.append(os.path.realpath(match))
+        if expanded:
+            result["workspace_members"] = expanded
+
+    return result if result else None
+
+
+def _detect_rust_toolchain(project_path):
+    """Detect Rust toolchain from rust-toolchain.toml or rust-toolchain."""
+    # rust-toolchain.toml (TOML format)
+    toml_path = os.path.join(project_path, _RUST_TOOLCHAIN_TOML)
+    if os.path.isfile(toml_path) and _tomllib is not None:
+        try:
+            with open(toml_path, "rb") as f:
+                data = _tomllib.load(f)
+            channel = data.get("toolchain", {}).get("channel")
+            if channel:
+                return str(channel)
+        except (OSError, Exception) as e:
+            logger.debug("Failed to parse %s: %s", toml_path, e)
+
+    # rust-toolchain (plain text, first line is channel)
+    plain_path = os.path.join(project_path, _RUST_TOOLCHAIN)
+    if os.path.isfile(plain_path):
+        try:
+            with open(plain_path, "r", encoding="utf-8",
+                      errors="replace") as f:
+                line = f.readline().strip()
+                if line and not line.startswith("["):
+                    return line
+        except OSError:
+            pass
+
+    return None
+
+
+class RustDetector(ProjectDetector):
+    """Detects Rust projects by Cargo.toml and related markers.
+
+    Detects Cargo.toml, workspace structure, build.rs presence,
+    and Rust toolchain configuration.
+    """
+
+    def detect(self, project_path, ide_metadata):
+        cargo_toml = os.path.join(project_path, _CARGO_TOML)
+        if not os.path.isfile(cargo_toml):
+            return []
+
+        details = {"build_system": "cargo"}
+
+        # Workspace root detection
+        workspace_root = _find_cargo_workspace_root(project_path)
+        if workspace_root != project_path:
+            details["workspace_root"] = workspace_root
+
+        # Parse Cargo.toml for detailed info
+        cargo_details = _parse_cargo_toml(project_path)
+        if cargo_details:
+            if "edition" in cargo_details:
+                details["edition"] = cargo_details["edition"]
+            if "workspace_members" in cargo_details:
+                details["workspace_members"] = cargo_details[
+                    "workspace_members"]
+
+        # build.rs presence
+        if os.path.isfile(os.path.join(project_path, _BUILD_RS)):
+            details["has_build_rs"] = True
+
+        # Rust toolchain
+        toolchain = _detect_rust_toolchain(project_path)
+        if toolchain:
+            details["rust_toolchain"] = toolchain
+
+        return [DetectedLanguage(
+            language="rust",
+            build_system="cargo",
+            confidence="high",
+            details=details,
+        )]
+
+
 # Register detectors
 register_detector(JavaKotlinDetector())
 register_detector(CppDetector())
+register_detector(PythonDetector())
+register_detector(RustDetector())
 
 
 # ---------------------------------------------------------------------------

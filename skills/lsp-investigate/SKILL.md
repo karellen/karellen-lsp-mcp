@@ -13,6 +13,8 @@ chains, find all usages of a symbol, or check compiler diagnostics across a code
 - An LSP server for the target language on PATH:
   - **C/C++**: `clangd` — install via `pip install --user karellen-lsp-mcp[clangd]` or system package manager
   - **Java/Kotlin**: `jdtls` — install via `pip install --user karellen-lsp-mcp[jdtls]`
+  - **Python**: `pyright` — install via `pip install --user karellen-lsp-mcp[pyright]`
+  - **Rust**: `rust-analyzer` — install via `rustup component add rust-analyzer`
   - **All servers**: `pip install --user karellen-lsp-mcp[all]`
 
 ## Workflow
@@ -150,6 +152,14 @@ lsp_deregister_project(project_id="<id>")
 
 ## Key Rules
 
+- **NEVER run build system commands** (`cmake`, `make`, `meson`, `cargo build`, `gradle`,
+  `mvn`, `pip install`, etc.) on the user's project. The LSP adapter handles build
+  configuration automatically. Register the project and let the adapter handle it.
+- **Register at the language-specific project root**, not the repository root. In
+  monorepos or polyglot projects, use `lsp_detect_project` first to find the correct
+  root for each language (where `Cargo.toml`, `pyproject.toml`, `CMakeLists.txt`, etc.
+  lives). Registering at a parent directory that lacks the language's build system marker
+  will fail or produce no results.
 - **Hover before reading.** `lsp_hover` is fast and often provides enough context
   (type signature, docs) without needing to read the full file.
 - **Use LSP instead of grepping.** `lsp_find_references` is semantically aware; it

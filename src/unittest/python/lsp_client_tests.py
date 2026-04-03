@@ -210,20 +210,34 @@ class LspClientEnsureFileOpenConcurrencyTest(unittest.TestCase):
         loop.close()
 
 
-class LspClientWriteMessageTest(unittest.TestCase):
-    def test_write_message_format(self):
+class LspClientWriteQueueTest(unittest.TestCase):
+    def test_write_loop_sends_queued_message(self):
         client = LspClient()
         client._process = MagicMock()
         client._process.stdin = _FakeStdin()
+        client._write_queue = asyncio.Queue()
+        client._server_label = "test"
 
         msg = {"jsonrpc": "2.0", "method": "initialized", "params": {}}
+
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(client._write_message(msg))
+
+        async def run():
+            writer = asyncio.create_task(client._write_loop())
+            client._write_queue.put_nowait(msg)
+            # Give the writer task a chance to process
+            await asyncio.sleep(0.05)
+            writer.cancel()
+            try:
+                await writer
+            except asyncio.CancelledError:
+                pass
+
+        loop.run_until_complete(run())
         loop.close()
 
         written = bytes(client._process.stdin.written)
         self.assertIn(b"Content-Length:", written)
-        # Split header and body
         header_end = written.index(b"\r\n\r\n") + 4
         body = written[header_end:]
         parsed = json.loads(body)
@@ -231,40 +245,20 @@ class LspClientWriteMessageTest(unittest.TestCase):
 
 
 class LspClientServerRequestTest(unittest.TestCase):
-    def test_respond_to_workspace_configuration(self):
+    def test_build_workspace_configuration_response(self):
         client = LspClient()
-        client._process = MagicMock()
-        client._process.stdin = _FakeStdin()
+        response = client._build_server_response(
+            99, "workspace/configuration",
+            {"items": [{"section": "clangd"}, {"section": "editor"}]})
+        self.assertEqual(response["id"], 99)
+        self.assertEqual(response["result"], [None, None])
 
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(
-            client._respond_to_server_request(
-                99, "workspace/configuration",
-                {"items": [{"section": "clangd"}, {"section": "editor"}]}
-            ))
-        loop.close()
-
-        written = bytes(client._process.stdin.written)
-        header_end = written.index(b"\r\n\r\n") + 4
-        body = json.loads(written[header_end:])
-        self.assertEqual(body["id"], 99)
-        self.assertEqual(body["result"], [None, None])
-
-    def test_respond_to_register_capability(self):
+    def test_build_register_capability_response(self):
         client = LspClient()
-        client._process = MagicMock()
-        client._process.stdin = _FakeStdin()
-
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(
-            client._respond_to_server_request(5, "client/registerCapability", {}))
-        loop.close()
-
-        written = bytes(client._process.stdin.written)
-        header_end = written.index(b"\r\n\r\n") + 4
-        body = json.loads(written[header_end:])
-        self.assertEqual(body["id"], 5)
-        self.assertIsNone(body["result"])
+        response = client._build_server_response(
+            5, "client/registerCapability", {})
+        self.assertEqual(response["id"], 5)
+        self.assertIsNone(response["result"])
 
 
 class LspClientSendRequestNoProcessTest(unittest.TestCase):

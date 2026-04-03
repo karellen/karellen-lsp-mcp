@@ -95,6 +95,7 @@ class ProjectRegistry:
                     )
                     cmd = config.command
                     root_uri = config.root_uri
+                    server_label = config.server_label
                     if config.init_options and init_options is None:
                         init_options = config.init_options
                 except ValueError as e:
@@ -106,6 +107,7 @@ class ProjectRegistry:
                     raise ProjectRegistryError(
                         "No LSP adapter for language '%s'" % language)
                 root_uri = "file://%s" % urllib.parse.quote(real_path, safe="/:@")
+                server_label = None
 
             entry = _ProjectEntry(project_id, real_path, language, cmd, build_info)
             entry.status = "starting"
@@ -122,9 +124,21 @@ class ProjectRegistry:
 
                 client = LspClient(request_timeout=self._request_timeout,
                                    ready_timeout=self._ready_timeout)
-                await client.start(cmd, root_uri,
-                                   init_options=init_options,
-                                   log_dir=log_dir)
+                try:
+                    await asyncio.wait_for(
+                        client.start(cmd, root_uri,
+                                     init_options=init_options,
+                                     log_dir=log_dir,
+                                     server_label=server_label),
+                        timeout=60)
+                except asyncio.TimeoutError:
+                    # Kill the process if start timed out
+                    try:
+                        await client.stop()
+                    except Exception:
+                        pass
+                    raise ProjectRegistryError(
+                        "LSP server start timed out after 60s: %s" % " ".join(cmd))
                 entry.client = client
                 entry.status = client.state_name
                 entry.refcount = 1

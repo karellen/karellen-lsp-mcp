@@ -38,8 +38,17 @@ from karellen_lsp_mcp.detector import (
     _read_eclipse_metadata,
     _read_vscode_metadata,
     _read_all_ide_metadata,
+    _is_pybuilder_project,
+    _parse_setup_cfg,
+    _detect_venv,
+    _detect_src_layout,
+    _find_cargo_workspace_root,
+    _cargo_toml_has_workspace,
+    _detect_rust_toolchain,
     IdeMetadata,
     CppDetector,
+    PythonDetector,
+    RustDetector,
     TIER_IDE_BUILD_SYNC,
     TIER_IDE_PROJECT,
     TIER_IDE_WORKSPACE,
@@ -310,6 +319,34 @@ class ReadJetbrainsMetadataTest(unittest.TestCase):
             self.assertEqual(meta.java_sdk, "azul-17")
             self.assertEqual(meta.java_language_level, "JDK_17")
             self.assertEqual(meta.tier, TIER_IDE_PROJECT)
+
+    def test_misc_xml_python_sdk_ignored(self):
+        """A Python SDK in misc.xml must not be treated as a Java SDK."""
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, ".idea", "misc.xml"), '''<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectRootManager" version="2"
+             project-jdk-name="Python 3.9 virtualenv at ~/.pyenv/versions/pyb-3.9"
+             project-jdk-type="Python SDK" />
+</project>''')
+            result = _read_jetbrains_metadata(d)
+            misc_entries = [m for m in result
+                            if m.raw.get("source") == "misc.xml"]
+            self.assertEqual(len(misc_entries), 0)
+
+    def test_misc_xml_no_jdk_type_accepted(self):
+        """Absent project-jdk-type should be accepted (backwards compat)."""
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, ".idea", "misc.xml"), '''<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectRootManager" version="2"
+             project-jdk-name="corretto-17" />
+</project>''')
+            result = _read_jetbrains_metadata(d)
+            misc_entries = [m for m in result
+                            if m.raw.get("source") == "misc.xml"]
+            self.assertEqual(len(misc_entries), 1)
+            self.assertEqual(misc_entries[0].java_sdk, "corretto-17")
 
     def test_compiler_xml(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1065,3 +1102,350 @@ class CppDetectorTest(unittest.TestCase):
             self.assertEqual(result[0].build_system, "unknown")
             self.assertEqual(result[0].confidence, "high")
             self.assertEqual(result[0].details["build_system"], "unknown")
+
+
+# ---------------------------------------------------------------------------
+# Python detector helpers
+# ---------------------------------------------------------------------------
+
+class IsPybuilderProjectTest(unittest.TestCase):
+    def test_detects_pybuilder_from_import(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "build.py"),
+                   "from pybuilder.core import use_plugin\n"
+                   "use_plugin('python.core')\n")
+            self.assertTrue(_is_pybuilder_project(d))
+
+    def test_detects_pybuilder_import_statement(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "build.py"),
+                   "import pybuilder\n")
+            self.assertTrue(_is_pybuilder_project(d))
+
+    def test_rejects_non_pybuilder_build_py(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "build.py"),
+                   "import os\nos.system('make')\n")
+            self.assertFalse(_is_pybuilder_project(d))
+
+    def test_no_build_py(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(_is_pybuilder_project(d))
+
+    def test_comment_before_import(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "build.py"),
+                   "# Build configuration\n"
+                   "from pybuilder.core import use_plugin\n")
+            self.assertTrue(_is_pybuilder_project(d))
+
+
+class ParseSetupCfgTest(unittest.TestCase):
+    def test_extracts_python_requires(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "setup.cfg"),
+                   "[options]\n"
+                   "python_requires = >=3.8\n"
+                   "packages = find:\n")
+            result = _parse_setup_cfg(d)
+            self.assertEqual(result["python_requires"], ">=3.8")
+            self.assertEqual(result["packages"], "find:")
+
+    def test_no_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(_parse_setup_cfg(d))
+
+    def test_empty_options(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "setup.cfg"),
+                   "[metadata]\nname = myproject\n")
+            self.assertIsNone(_parse_setup_cfg(d))
+
+
+class DetectVenvTest(unittest.TestCase):
+    def test_detects_dot_venv_with_pyvenv_cfg(self):
+        with tempfile.TemporaryDirectory() as d:
+            venv_dir = os.path.join(d, ".venv")
+            os.makedirs(os.path.join(venv_dir, "bin"))
+            _write(os.path.join(venv_dir, "pyvenv.cfg"),
+                   "home = /usr/bin\n"
+                   "version = 3.11.5\n")
+            _write(os.path.join(venv_dir, "bin", "python"), "")
+            result = _detect_venv(d)
+            self.assertEqual(result["venv_path"], venv_dir)
+            self.assertEqual(result["venv_version"], "3.11.5")
+            self.assertIn("venv_python", result)
+
+    def test_detects_venv_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            venv_dir = os.path.join(d, "venv")
+            os.makedirs(os.path.join(venv_dir, "bin"))
+            _write(os.path.join(venv_dir, "pyvenv.cfg"),
+                   "home = /usr/bin\n"
+                   "version = 3.10.0\n")
+            result = _detect_venv(d)
+            self.assertEqual(result["venv_path"], venv_dir)
+
+    def test_detects_conda_environment(self):
+        with tempfile.TemporaryDirectory() as d:
+            venv_dir = os.path.join(d, ".venv")
+            os.makedirs(os.path.join(venv_dir, "conda-meta"))
+            os.makedirs(os.path.join(venv_dir, "bin"))
+            _write(os.path.join(venv_dir, "conda-meta", "history"),
+                   "# history\n")
+            _write(os.path.join(venv_dir, "bin", "python"), "")
+            result = _detect_venv(d)
+            self.assertTrue(result.get("is_conda"))
+            self.assertEqual(result["venv_path"], venv_dir)
+
+    def test_no_venv(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = _detect_venv(d)
+            self.assertEqual(result, {})
+
+    def test_dot_venv_preferred_over_venv(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name in (".venv", "venv"):
+                vdir = os.path.join(d, name)
+                os.makedirs(os.path.join(vdir, "bin"))
+                _write(os.path.join(vdir, "pyvenv.cfg"),
+                       "home = /usr/bin\nversion = 3.11.0\n")
+            result = _detect_venv(d)
+            self.assertEqual(result["venv_path"],
+                             os.path.join(d, ".venv"))
+
+
+class DetectSrcLayoutTest(unittest.TestCase):
+    def test_src_with_package(self):
+        with tempfile.TemporaryDirectory() as d:
+            pkg = os.path.join(d, "src", "mypackage")
+            os.makedirs(pkg)
+            _touch(os.path.join(pkg, "__init__.py"))
+            self.assertTrue(_detect_src_layout(d))
+
+    def test_src_with_py_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "src"))
+            _write(os.path.join(d, "src", "main.py"), "print('hello')")
+            self.assertTrue(_detect_src_layout(d))
+
+    def test_no_src_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(_detect_src_layout(d))
+
+    def test_empty_src_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "src"))
+            self.assertFalse(_detect_src_layout(d))
+
+
+# ---------------------------------------------------------------------------
+# Python detector
+# ---------------------------------------------------------------------------
+
+class PythonDetectorTest(unittest.TestCase):
+    def setUp(self):
+        self.detector = PythonDetector()
+
+    def test_detects_pyproject_toml(self):
+        with tempfile.TemporaryDirectory() as d:
+            _touch(os.path.join(d, "pyproject.toml"))
+            result = self.detector.detect(d, [])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].language, "python")
+            self.assertEqual(result[0].confidence, "high")
+
+    def test_detects_setup_py(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "setup.py"),
+                   "from setuptools import setup\nsetup(name='test')\n")
+            result = self.detector.detect(d, [])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].language, "python")
+            self.assertEqual(result[0].build_system, "setuptools")
+
+    def test_detects_setup_cfg(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "setup.cfg"),
+                   "[metadata]\nname = myproject\n"
+                   "[options]\npython_requires = >=3.8\n")
+            result = self.detector.detect(d, [])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].build_system, "setuptools")
+            self.assertEqual(result[0].details["python_requires"], ">=3.8")
+
+    def test_detects_pipfile(self):
+        with tempfile.TemporaryDirectory() as d:
+            _touch(os.path.join(d, "Pipfile"))
+            result = self.detector.detect(d, [])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].build_system, "pipenv")
+            self.assertEqual(result[0].confidence, "medium")
+
+    def test_detects_requirements_txt(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "requirements.txt"), "flask>=2.0\nrequests\n")
+            result = self.detector.detect(d, [])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].build_system, "pip")
+            self.assertEqual(result[0].confidence, "medium")
+
+    def test_detects_pybuilder(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "build.py"),
+                   "from pybuilder.core import use_plugin\n"
+                   "use_plugin('python.core')\n")
+            result = self.detector.detect(d, [])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].build_system, "pybuilder")
+            self.assertEqual(result[0].confidence, "high")
+
+    def test_pybuilder_priority_over_pyproject(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "build.py"),
+                   "from pybuilder.core import use_plugin\n")
+            _touch(os.path.join(d, "pyproject.toml"))
+            result = self.detector.detect(d, [])
+            self.assertEqual(result[0].build_system, "pybuilder")
+
+    def test_no_detection_empty_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.detector.detect(d, [])
+            self.assertEqual(result, [])
+
+    def test_detects_venv(self):
+        with tempfile.TemporaryDirectory() as d:
+            _touch(os.path.join(d, "pyproject.toml"))
+            venv_dir = os.path.join(d, ".venv")
+            os.makedirs(os.path.join(venv_dir, "bin"))
+            _write(os.path.join(venv_dir, "pyvenv.cfg"),
+                   "home = /usr/bin\nversion = 3.11.0\n")
+            result = self.detector.detect(d, [])
+            self.assertEqual(result[0].details["venv_path"], venv_dir)
+
+    def test_detects_pyrightconfig(self):
+        with tempfile.TemporaryDirectory() as d:
+            _touch(os.path.join(d, "pyproject.toml"))
+            _write(os.path.join(d, "pyrightconfig.json"), "{}")
+            result = self.detector.detect(d, [])
+            self.assertTrue(result[0].details.get("pyrightconfig"))
+
+    def test_detects_src_layout(self):
+        with tempfile.TemporaryDirectory() as d:
+            _touch(os.path.join(d, "pyproject.toml"))
+            pkg = os.path.join(d, "src", "mypackage")
+            os.makedirs(pkg)
+            _touch(os.path.join(pkg, "__init__.py"))
+            result = self.detector.detect(d, [])
+            self.assertTrue(result[0].details.get("src_layout"))
+
+    def test_setup_py_recorded_in_details(self):
+        with tempfile.TemporaryDirectory() as d:
+            _touch(os.path.join(d, "pyproject.toml"))
+            _write(os.path.join(d, "setup.py"), "from setuptools import setup\n")
+            result = self.detector.detect(d, [])
+            self.assertTrue(result[0].details.get("has_setup_py"))
+
+
+# ---------------------------------------------------------------------------
+# Rust detector helpers
+# ---------------------------------------------------------------------------
+
+class CargoTomlHasWorkspaceTest(unittest.TestCase):
+    def test_detects_workspace_section(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "Cargo.toml"),
+                   "[workspace]\nmembers = [\"crate-a\", \"crate-b\"]\n")
+            self.assertTrue(_cargo_toml_has_workspace(
+                os.path.join(d, "Cargo.toml")))
+
+    def test_no_workspace_section(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "Cargo.toml"),
+                   "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n")
+            self.assertFalse(_cargo_toml_has_workspace(
+                os.path.join(d, "Cargo.toml")))
+
+
+class FindCargoWorkspaceRootTest(unittest.TestCase):
+    def test_finds_workspace_root_above(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "Cargo.toml"),
+                   "[workspace]\nmembers = [\"crates/a\"]\n")
+            sub = os.path.join(d, "crates", "a")
+            os.makedirs(sub)
+            _write(os.path.join(sub, "Cargo.toml"),
+                   "[package]\nname = \"a\"\n")
+            result = _find_cargo_workspace_root(sub)
+            self.assertEqual(result, d)
+
+    def test_returns_self_when_no_workspace_above(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "Cargo.toml"),
+                   "[package]\nname = \"standalone\"\n")
+            result = _find_cargo_workspace_root(d)
+            self.assertEqual(result, d)
+
+
+class DetectRustToolchainTest(unittest.TestCase):
+    def test_plain_toolchain_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "rust-toolchain"), "nightly\n")
+            self.assertEqual(_detect_rust_toolchain(d), "nightly")
+
+    def test_no_toolchain(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(_detect_rust_toolchain(d))
+
+
+# ---------------------------------------------------------------------------
+# Rust detector
+# ---------------------------------------------------------------------------
+
+class RustDetectorTest(unittest.TestCase):
+    def setUp(self):
+        self.detector = RustDetector()
+
+    def test_detects_cargo_toml(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "Cargo.toml"),
+                   "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n")
+            result = self.detector.detect(d, [])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].language, "rust")
+            self.assertEqual(result[0].build_system, "cargo")
+            self.assertEqual(result[0].confidence, "high")
+
+    def test_no_detection_without_cargo_toml(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "main.rs"), "fn main() {}")
+            result = self.detector.detect(d, [])
+            self.assertEqual(result, [])
+
+    def test_detects_build_rs(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "Cargo.toml"),
+                   "[package]\nname = \"my-crate\"\n")
+            _write(os.path.join(d, "build.rs"),
+                   "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }")
+            result = self.detector.detect(d, [])
+            self.assertTrue(result[0].details.get("has_build_rs"))
+
+    def test_detects_rust_toolchain(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "Cargo.toml"),
+                   "[package]\nname = \"my-crate\"\n")
+            _write(os.path.join(d, "rust-toolchain"), "stable\n")
+            result = self.detector.detect(d, [])
+            self.assertEqual(result[0].details["rust_toolchain"], "stable")
+
+    def test_detects_workspace_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            _write(os.path.join(d, "Cargo.toml"),
+                   "[workspace]\nmembers = [\"crates/a\"]\n")
+            sub = os.path.join(d, "crates", "a")
+            os.makedirs(sub)
+            _write(os.path.join(sub, "Cargo.toml"),
+                   "[package]\nname = \"a\"\n")
+            result = self.detector.detect(sub, [])
+            self.assertEqual(result[0].details["workspace_root"], d)
