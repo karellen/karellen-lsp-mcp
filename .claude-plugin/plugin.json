@@ -9,5 +9,5 @@
   "homepage": "https://karellen.co",
   "repository": "https://github.com/karellen/karellen-lsp-mcp",
   "license": "Apache-2.0",
-  "keywords": ["lsp", "language-server-protocol", "mcp", "code-intelligence", "clangd", "jdtls"]
+  "keywords": ["lsp", "language-server-protocol", "mcp", "code-intelligence", "clangd", "jdtls", "pyright", "rust-analyzer"]
 }

@@ -48,12 +48,14 @@ def _project_managed_dir(project_path, adapter_name):
 
 class LspAdapterConfig:
     """Configuration produced by an adapter for starting an LSP server."""
-    __slots__ = ("command", "root_uri", "init_options")
+    __slots__ = ("command", "root_uri", "init_options", "server_label")
 
-    def __init__(self, command, root_uri, init_options=None):
+    def __init__(self, command, root_uri, init_options=None,
+                 server_label=None):
         self.command = command
         self.root_uri = root_uri
         self.init_options = init_options
+        self.server_label = server_label
 
 
 class LspAdapter:
@@ -112,6 +114,12 @@ class LspAdapter:
         if os.path.isdir(managed):
             _shutil.rmtree(managed)
             logger.info("Cleaned managed data: %s", managed)
+
+
+def _server_debug():
+    """Check if LSP server debug logging is requested."""
+    return os.environ.get(
+        "LSP_MCP_SERVER_DEBUG", "").lower() in ("1", "true", "yes")
 
 
 def _path_to_uri(path):
@@ -262,9 +270,13 @@ class ClangdAdapter(LspAdapter):
             if "--background-index" not in cmd:
                 cmd.append("--background-index")
 
+            if _server_debug() and "--log=verbose" not in cmd:
+                cmd.append("--log=verbose")
+
         return LspAdapterConfig(
             command=cmd,
             root_uri=_path_to_uri(project_path),
+            server_label="clangd",
         )
 
     def _resolve_compile_commands_dir(self, project_path, build_info, details):
@@ -513,6 +525,7 @@ class JdtlsAdapter(LspAdapter):
             command=cmd,
             root_uri=_path_to_uri(workspace_root),
             init_options=init_options,
+            server_label="jdtls",
         )
 
     def _build_init_options(self, details):
@@ -536,6 +549,9 @@ class JdtlsAdapter(LspAdapter):
         if gradle_modules_source:
             settings["java.import.gradle.wrapper.enabled"] = True
 
+        if _server_debug():
+            settings["java.trace.server"] = "verbose"
+
         opts = {}
         if settings:
             opts["settings"] = settings
@@ -546,6 +562,156 @@ class JdtlsAdapter(LspAdapter):
         }
 
         return opts if opts else None
+
+
+# ---------------------------------------------------------------------------
+# Pyright Adapter
+# ---------------------------------------------------------------------------
+
+class PyrightAdapter(LspAdapter):
+    """Adapter for pyright (Python).
+
+    Launches the pyright Node.js language server directly, bypassing the
+    Python wrapper script. The wrapper adds an extra process layer and
+    can cause startup delays (npm download on first run).
+
+    Handles virtual environment detection so pyright uses the correct
+    Python interpreter. Pyright respects pyrightconfig.json and
+    pyproject.toml [tool.pyright] automatically.
+    """
+
+    languages = ("python",)
+    managed_dir_name = "pyright"
+    _langserver_js_cache = None  # cached path to langserver.index.js
+
+    def check_server(self):
+        available = self._find_langserver_js() is not None
+        hint = ("Run: pip install --user karellen-lsp-mcp[pyright] — "
+                "or: pip install --user pyright")
+        return available, hint
+
+    @classmethod
+    def _find_langserver_js(cls):
+        """Find the pyright Node.js langserver entry point.
+
+        Returns the path to langserver.index.js, or None if not found.
+        Triggers pyright's install_pyright() to ensure the npm package
+        is downloaded (cached after first run). Result is cached.
+        """
+        if cls._langserver_js_cache is not None:
+            if os.path.isfile(cls._langserver_js_cache):
+                return cls._langserver_js_cache
+            cls._langserver_js_cache = None
+        try:
+            from pyright.langserver import install_pyright
+            pkg_dir = install_pyright([], quiet=True)
+            binary = pkg_dir / "langserver.index.js"
+            if binary.exists():
+                cls._langserver_js_cache = str(binary)
+                return cls._langserver_js_cache
+        except Exception:
+            pass
+        return None
+
+    def configure(self, project_path, language, lsp_command=None,
+                  build_info=None, detection_details=None):
+        if lsp_command:
+            cmd = list(lsp_command)
+        else:
+            langserver_js = self._find_langserver_js()
+            if langserver_js is None:
+                raise ValueError(
+                    "pyright not found. Install it: "
+                    "pip install --user pyright")
+            node = _shutil.which("node")
+            if node is None:
+                raise ValueError(
+                    "node not found on PATH. "
+                    "pyright requires Node.js.")
+            cmd = [node, langserver_js, "--", "--stdio"]
+        bi = build_info or {}
+        details = detection_details or {}
+
+        settings = {}
+
+        # Forward virtual environment path to pyright
+        venv_path = bi.get("venv_path") or details.get("venv_path")
+        if venv_path:
+            settings["python.pythonPath"] = os.path.join(
+                venv_path, "bin", "python")
+            settings["python.venvPath"] = os.path.dirname(venv_path)
+            settings["python.venv"] = os.path.basename(venv_path)
+
+        # Source path configuration for pyright analysis.
+        # Without this, pyright only scans the project root and won't
+        # find files in non-standard layouts (e.g. src/main/python/).
+        include = bi.get("include") or details.get("include")
+        extra_paths = bi.get("extra_paths") or details.get("extra_paths")
+
+        if not include and details.get("src_layout"):
+            # Auto-detect: if src layout detected, include src/
+            include = ["src"]
+
+        if include:
+            settings["python.analysis.include"] = include
+        if extra_paths:
+            settings["python.analysis.extraPaths"] = extra_paths
+
+        if _server_debug():
+            settings["python.analysis.logLevel"] = "trace"
+
+        init_options = {}
+        if settings:
+            init_options["settings"] = settings
+
+        return LspAdapterConfig(
+            command=cmd,
+            root_uri=_path_to_uri(project_path),
+            init_options=init_options if init_options else None,
+            server_label="pyright",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Rust Analyzer Adapter
+# ---------------------------------------------------------------------------
+
+class RustAnalyzerAdapter(LspAdapter):
+    """Adapter for rust-analyzer (Rust).
+
+    rust-analyzer reads Cargo.toml directly and manages its own cache
+    in the project's target/ directory. For Cargo workspaces, the
+    workspace root is used as root_uri so all members are visible.
+    """
+
+    languages = ("rust",)
+    managed_dir_name = None  # rust-analyzer uses project's target/ dir
+
+    def check_server(self):
+        available = _shutil.which("rust-analyzer") is not None
+        hint = "Run: rustup component add rust-analyzer"
+        return available, hint
+
+    def configure(self, project_path, language, lsp_command=None,
+                  build_info=None, detection_details=None):
+        cmd = list(lsp_command) if lsp_command else ["rust-analyzer"]
+        details = detection_details or {}
+
+        # Use workspace root if detected
+        workspace_root = details.get("workspace_root", project_path)
+
+        init_options = None
+        if _server_debug():
+            init_options = {"settings": {
+                "rust-analyzer.trace.server": "verbose",
+            }}
+
+        return LspAdapterConfig(
+            command=cmd,
+            root_uri=_path_to_uri(workspace_root),
+            init_options=init_options,
+            server_label="rust-analyzer",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -587,3 +753,5 @@ def get_supported_languages():
 # Register built-in adapters
 register_adapter(ClangdAdapter())
 register_adapter(JdtlsAdapter())
+register_adapter(PyrightAdapter())
+register_adapter(RustAnalyzerAdapter())

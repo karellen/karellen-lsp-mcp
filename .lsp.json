@@ -14,7 +14,11 @@
       ".H": "cpp",
       ".java": "java",
       ".kt": "kotlin",
-      ".kts": "kotlin"
+      ".kts": "kotlin",
+      ".py": "python",
+      ".pyi": "python",
+      ".pyx": "python",
+      ".rs": "rust"
     },
     "startupTimeout": 120000
   }

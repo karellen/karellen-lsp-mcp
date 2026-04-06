@@ -23,7 +23,7 @@ fi
 
 # Check for compiler error patterns from various toolchains
 MATCH=$(echo "$TEXT" | grep -oE \
-  'error: |: error:|fatal error:|undefined reference to|cannot find symbol|package .+ does not exist|cannot resolve symbol|error\[E[0-9]+\]:|error CS[0-9]+:|TS[0-9]+:|compilation failed|BUILD FAILED|COMPILATION ERROR' \
+  'error: |: error:|fatal error:|undefined reference to|cannot find symbol|package .+ does not exist|cannot resolve symbol|error\[E[0-9]+\]:|error CS[0-9]+:|TS[0-9]+:|compilation failed|BUILD FAILED|COMPILATION ERROR|SyntaxError:|ModuleNotFoundError:|ImportError:|Traceback \(most recent call last\)' \
   2>/dev/null | head -1)
 
 [ -n "$MATCH" ] || exit 0

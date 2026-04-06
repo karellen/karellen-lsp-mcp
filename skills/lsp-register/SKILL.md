@@ -1,5 +1,5 @@
 ---
-description: Register a project for LSP code intelligence. Auto-detects language and build system, or accepts explicit configuration. Handles C/C++ (clangd), Java/Kotlin (jdtls), and custom LSP servers.
+description: Register a project for LSP code intelligence. Auto-detects language and build system, or accepts explicit configuration. Handles C/C++ (clangd), Java/Kotlin (jdtls), Python (pyright), Rust (rust-analyzer), and custom LSP servers.
 ---
 
 # LSP Project Registration
@@ -13,6 +13,8 @@ all `lsp_*` query tools become available for that project.
 - An LSP server for the target language:
   - **C/C++**: `clangd` — install via `pip install --user karellen-lsp-mcp[clangd]` or system package manager
   - **Java/Kotlin**: `jdtls` — install via `pip install --user karellen-lsp-mcp[jdtls]`
+  - **Python**: `pyright` — install via `pip install --user karellen-lsp-mcp[pyright]`
+  - **Rust**: `rust-analyzer` — install via `rustup component add rust-analyzer`
   - **All servers**: `pip install --user karellen-lsp-mcp[all]`
   - **Other languages**: any LSP server, specified via `lsp_command`
 
@@ -46,7 +48,8 @@ lsp_register_project(project_path="/path/to/project")
 ```
 
 Auto-detection scans for build system markers (CMakeLists.txt, build.gradle, pom.xml,
-etc.), IDE metadata (.idea/, .classpath, .vscode/), and source file conventions.
+pyproject.toml, Cargo.toml, etc.), IDE metadata (.idea/, .classpath, .vscode/), and
+source file conventions.
 
 #### Explicit Language
 
@@ -92,6 +95,33 @@ For multi-module Gradle projects, register the root (where settings.gradle is):
 lsp_register_project(project_path="/path/to/gradle-root", language="java")
 ```
 
+#### Python with pyright
+
+```
+lsp_register_project(project_path="/path/to/project", language="python")
+```
+
+Virtual environments are detected automatically. To specify one explicitly:
+
+```
+lsp_register_project(
+    project_path="/path/to/project",
+    language="python",
+    build_info={"venv_path": "/path/to/.venv"}
+)
+```
+
+#### Rust with rust-analyzer
+
+Register at the directory containing `Cargo.toml`:
+
+```
+lsp_register_project(project_path="/path/to/crate", language="rust")
+```
+
+For Cargo workspaces, register at any member crate — the workspace root is detected
+automatically. Do NOT register at a parent directory that has no `Cargo.toml`.
+
 #### Custom LSP Server
 
 For languages without a built-in adapter:
@@ -99,8 +129,8 @@ For languages without a built-in adapter:
 ```
 lsp_register_project(
     project_path="/path/to/project",
-    language="rust",
-    lsp_command=["rust-analyzer"]
+    language="go",
+    lsp_command=["gopls"]
 )
 ```
 
@@ -144,6 +174,16 @@ This decrements the refcount. The LSP server stops when all sessions deregister.
 
 ## Key Rules
 
+- **NEVER run build system commands** (`cmake`, `make`, `meson`, `cargo build`, `gradle`,
+  `mvn`, `pip install`, etc.) on the user's project. The LSP adapter handles build
+  configuration automatically. If `compile_commands.json` is missing for C/C++, register
+  the project anyway — clangd still works without it, and the adapter generates one for
+  CMake/Meson in a managed directory without polluting the project tree.
+- **Register at the language-specific project root**, not the repository root. In
+  monorepos or polyglot projects, use `lsp_detect_project` first to find the correct
+  root for each language (where `Cargo.toml`, `pyproject.toml`, `CMakeLists.txt`, etc.
+  lives). Registering at a parent directory that lacks the language's build system marker
+  will fail or produce no results.
 - **Register once per session.** Multiple registrations of the same project share one
   LSP server instance (refcounted).
 - **Use `force=True` to restart.** If the LSP server gets into a bad state, re-register

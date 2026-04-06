@@ -25,6 +25,7 @@ import json
 import logging
 import contextvars
 import os
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -84,6 +85,9 @@ class LspClient:
         self._indexing_done_task = None
         self._request_timeout = request_timeout
         self._ready_timeout = ready_timeout
+        self._server_label = None  # e.g. "clangd", "pyright", set in start()
+        self._write_queue = asyncio.Queue()  # all outgoing messages
+        self._writer_task = None   # single writer task consuming the queue
 
     @property
     def root_uri(self):
@@ -110,16 +114,20 @@ class LspClient:
         return self._normalizer.state_name
 
     async def start(self, command, root_uri, init_options=None,
-                    log_dir=None):
+                    log_dir=None, server_label=None):
         """Spawn LSP server and perform initialize/initialized handshake."""
         self._root_uri = root_uri
+        self._server_label = server_label or (
+            os.path.basename(command[0]) if command else "unknown")
         root_path = urllib.parse.unquote(root_uri).removeprefix("file://")
 
         # Store settings for workspace/configuration responses
         if init_options and isinstance(init_options.get("settings"), dict):
             self._settings = init_options["settings"]
 
-        self._normalizer = create_normalizer(command, warmup_timeout=self._ready_timeout)
+        self._normalizer = create_normalizer(
+            command, warmup_timeout=self._ready_timeout,
+            server_label=self._server_label)
         self._normalizer.set_ready_callback(self._on_normalizer_ready)
 
         logger.info("Starting LSP server: %s (root=%s)", command, root_uri)
@@ -142,6 +150,7 @@ class LspClient:
             stderr=stderr_target,
         )
 
+        self._writer_task = asyncio.create_task(self._write_loop())
         self._reader_task = asyncio.create_task(self._read_loop())
 
         _all_symbol_kinds = list(types.SymbolKind)
@@ -241,6 +250,14 @@ class LspClient:
         await self._send_notification("initialized", {})
         logger.info("LSP server initialized successfully")
 
+        # Push configuration to the server if settings were provided.
+        # Some servers (e.g. pyright) don't pull via workspace/configuration
+        # but respond to workspace/didChangeConfiguration push.
+        if self._settings:
+            await self._send_notification(
+                "workspace/didChangeConfiguration",
+                {"settings": self._settings})
+
         self._normalizer.on_started()
         self._initialized_event.set()
         self._indexing_done_task = asyncio.create_task(self._indexing_timeout())
@@ -283,6 +300,17 @@ class LspClient:
             except asyncio.CancelledError:
                 pass
 
+        if self._writer_task:
+            self._write_queue.put_nowait(self._WRITE_SENTINEL)
+            try:
+                await asyncio.wait_for(self._writer_task, timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._writer_task.cancel()
+                try:
+                    await self._writer_task
+                except asyncio.CancelledError:
+                    pass
+
         if self._process.returncode is None:
             try:
                 self._process.terminate()
@@ -298,10 +326,13 @@ class LspClient:
             self._stderr_file.close()
             self._stderr_file = None
 
-        # Fail any pending requests
+        self._fail_pending("LSP server stopped")
+
+    def _fail_pending(self, reason):
+        """Fail all pending request futures with the given reason."""
         for fut in self._pending.values():
             if not fut.done():
-                fut.set_exception(LspClientError("LSP server stopped"))
+                fut.set_exception(LspClientError(reason))
         self._pending.clear()
 
     async def wait_initialized(self, timeout=None):
@@ -338,7 +369,11 @@ class LspClient:
         # If another coroutine is already opening this file, wait for it
         event = self._opening_files.get(uri)
         if event is not None:
-            await event.wait()
+            try:
+                await asyncio.wait_for(event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                raise LspClientError(
+                    "Timeout waiting for file open: %s" % uri)
             return
 
         event = asyncio.Event()
@@ -449,7 +484,11 @@ class LspClient:
 
         event = self._opening_files.get(uri)
         if event is not None:
-            await event.wait()
+            try:
+                await asyncio.wait_for(event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                raise LspClientError(
+                    "Timeout waiting for file open: %s" % uri)
             return
 
         event = asyncio.Event()
@@ -585,13 +624,18 @@ class LspClient:
         fut = loop.create_future()
         self._pending[msg_id] = fut
 
-        await self._write_message(msg)
+        logger.debug("TX [%s] id=%s %s", self._server_label, msg_id, method)
+        self._write_queue.put_nowait(msg)
 
         timeout = request_timeout_override.get() or self._request_timeout
         try:
-            return await asyncio.wait_for(fut, timeout=timeout)
+            result = await asyncio.wait_for(fut, timeout=timeout)
+            logger.debug("RX [%s] id=%s %s (ok)", self._server_label, msg_id, method)
+            return result
         except asyncio.TimeoutError:
             self._pending.pop(msg_id, None)
+            logger.warning("RX [%s] id=%s %s TIMEOUT after %ds",
+                           self._server_label, msg_id, method, timeout)
             raise LspClientError("Timeout waiting for response to %s" % method)
 
     async def _send_notification(self, method, params):
@@ -603,14 +647,51 @@ class LspClient:
         if params is not None:
             msg["params"] = params
 
-        await self._write_message(msg)
+        logger.debug("TX [%s] notify %s", self._server_label, method)
+        self._write_queue.put_nowait(msg)
 
-    async def _write_message(self, msg):
-        body = json.dumps(msg, separators=(",", ":"))
-        body_bytes = body.encode("utf-8")
-        header = "Content-Length: %d\r\n\r\n" % len(body_bytes)
-        self._process.stdin.write(header.encode("ascii") + body_bytes)
-        await self._process.stdin.drain()
+    _WRITE_SENTINEL = object()  # poison pill to stop write loop
+
+    async def _write_loop(self):
+        """Single writer task: drains the write queue and sends messages
+        to the LSP server's stdin. All writes are serialized here,
+        keeping the read loop free from blocking on drain().
+        """
+        try:
+            while True:
+                msg = await self._write_queue.get()
+                if msg is self._WRITE_SENTINEL:
+                    break
+                body = json.dumps(msg, separators=(",", ":"))
+                body_bytes = body.encode("utf-8")
+                header = "Content-Length: %d\r\n\r\n" % len(body_bytes)
+                self._process.stdin.write(
+                    header.encode("ascii") + body_bytes)
+                try:
+                    t0 = time.monotonic()
+                    await asyncio.wait_for(
+                        self._process.stdin.drain(), timeout=5)
+                    elapsed = time.monotonic() - t0
+                    if elapsed > 0.1:
+                        logger.warning(
+                            "Slow drain [%s]: %.1fs for %d bytes",
+                            self._server_label, elapsed,
+                            len(body_bytes))
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "LSP server [%s] not reading from stdin "
+                        "after 5s, killing process",
+                        self._server_label)
+                    self._process.kill()
+                    break
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.error("LSP writer loop error [%s]",
+                         self._server_label, exc_info=True)
+        # Writer is dead — fail all pending requests so callers
+        # don't hang waiting for responses that will never arrive.
+        self._fail_pending("LSP server writer stopped")
 
     async def _read_loop(self):
         """Background task reading JSON-RPC messages from the LSP server stdout."""
@@ -620,8 +701,6 @@ class LspClient:
                 if msg is None:
                     break
                 await self._dispatch_message(msg)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.error("LSP reader loop error", exc_info=True)
 
@@ -657,10 +736,15 @@ class LspClient:
             msg_id = msg["id"]
             fut = self._pending.pop(msg_id, None)
             if fut is None:
-                logger.warning("Received response for unknown id: %s", msg_id)
+                logger.warning("RX [%s] response for unknown id=%s",
+                               self._server_label, msg_id)
                 return
             if "error" in msg:
                 err = msg["error"]
+                logger.debug("RX [%s] id=%s error %s: %s",
+                             self._server_label, msg_id,
+                             err.get("code", "?"),
+                             err.get("message", "?")[:100])
                 fut.set_exception(LspClientError(
                     "LSP error %s: %s" % (err.get("code", "?"), err.get("message", "unknown"))
                 ))
@@ -671,15 +755,22 @@ class LspClient:
             self._handle_notification(msg["method"], msg.get("params"))
         elif "method" in msg and "id" in msg:
             # Server request (e.g., window/showMessage, workspace/configuration)
-            # Respond with null for unsupported requests
-            await self._respond_to_server_request(msg["id"], msg["method"], msg.get("params"))
+            # Build the response and put it on the write queue.
+            # The write loop sends it without blocking the read loop.
+            response = self._build_server_response(
+                msg["id"], msg["method"], msg.get("params"))
+            self._write_queue.put_nowait(response)
             # Also forward to normalizer — some servers (jdtls) send
             # status updates as requests rather than notifications
             if self._normalizer:
                 self._normalizer.on_notification(msg["method"], msg.get("params"))
 
-    async def _respond_to_server_request(self, msg_id, method, params):
-        """Respond to server-initiated requests with sensible defaults."""
+    def _build_server_response(self, msg_id, method, params):
+        """Build a response to a server-initiated request.
+
+        Pure computation, no I/O. The response dict is placed on the
+        write queue by the caller.
+        """
         result = None
         if method == "workspace/configuration":
             # Return settings matching each requested section
@@ -688,15 +779,10 @@ class LspClient:
             for item in items:
                 section = item.get("section", "")
                 if self._settings and section:
-                    # Build a settings dict for this section by matching
-                    # keys that start with "{section}." and stripping
-                    # the prefix, or returning the full settings if
-                    # section is empty
                     prefix = section + "."
                     section_settings = {}
                     for k, v in self._settings.items():
                         if k.startswith(prefix):
-                            # Nest dotted keys: "import.gradle.java.home" -> {"import": {"gradle": {"java": {"home": v}}}}
                             parts = k[len(prefix):].split(".")
                             d = section_settings
                             for p in parts[:-1]:
@@ -713,8 +799,7 @@ class LspClient:
         elif method == "window/workDoneProgress/create":
             result = None
 
-        response = {"jsonrpc": "2.0", "id": msg_id, "result": result}
-        await self._write_message(response)
+        return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
     def _handle_notification(self, method, params):
         """Handle LSP notifications."""

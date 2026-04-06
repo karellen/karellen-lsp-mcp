@@ -289,42 +289,18 @@ class LspNormalizer:
         return 0
 
 
-class ClangdNormalizer(LspNormalizer):
-    """Normalizer for clangd-specific behavior.
+class ProgressNormalizer(LspNormalizer):
+    """Progress-tracking normalizer for LSP servers using $/progress.
 
-    clangd needs time after startup to index a project. During this warmup:
+    Base class for servers that report indexing progress via standard
+    $/progress notifications. Tracks progress tokens to determine when
+    indexing completes (all progress tokens ended).
 
-    - Single-file queries (hover, definition, document symbols) work immediately
-      because clangd parses the preamble on didOpen.
-    - Cross-file queries (references, incoming calls) return valid but incomplete
-      results until background indexing finishes.
-    - clangd reports indexing progress via $/progress notifications.
-
-    This normalizer:
-    - Tracks $/progress notifications to detect when indexing completes
-    - Classifies clangd-specific transient errors for retry
-    - Normalizes LSP JSON-RPC errors into user-friendly messages
-    - Detects clangd version and reports feature availability
+    Used directly for pyright, rust-analyzer, and other standard servers.
+    Subclassed by ClangdNormalizer for clangd-specific quirks.
     """
 
-    # Error message fragments that indicate a transient warmup condition
-    _TRANSIENT_ERROR_FRAGMENTS = (
-        "not indexed",
-        "not ready",
-        "building preamble",
-        "background indexing",
-        "file not found in compilation database",
-    )
-
-    # Minimum clangd major version required for each LSP method.
-    # Methods not listed here are assumed supported by all versions.
-    _METHOD_MIN_VERSION = {
-        "callHierarchy/outgoingCalls": 20,
-    }
-
-    _VERSION_RE = re.compile(r"(\d+)\.")
-
-    def __init__(self, warmup_timeout=60, max_retries=5, retry_delay=1.0):
+    def __init__(self, warmup_timeout=60, max_retries=3, retry_delay=1.0):
         super().__init__()
         self._warmup_timeout = warmup_timeout
         self._max_retries = max_retries
@@ -335,28 +311,6 @@ class ClangdNormalizer(LspNormalizer):
         self._saw_any_progress = False
         self._progress = {}  # token -> {title, message, percentage}
         self._completed_progress = []  # [{title, message}]
-        self._major_version = None
-
-    def on_server_info(self, server_info):
-        super().on_server_info(server_info)
-        if self._server_version:
-            m = self._VERSION_RE.search(self._server_version)
-            if m:
-                self._major_version = int(m.group(1))
-                logger.info("Detected clangd major version: %d", self._major_version)
-
-    @property
-    def needs_position_fallback(self):
-        return True
-
-    def supports_method(self, method):
-        min_ver = self._METHOD_MIN_VERSION.get(method)
-        if min_ver is None:
-            return True
-        if self._major_version is None:
-            # Unknown version — assume supported, let runtime error handle it
-            return True
-        return self._major_version >= min_ver
 
     def on_started(self):
         self._start_time = time.monotonic()
@@ -448,14 +402,12 @@ class ClangdNormalizer(LspNormalizer):
         """Called by LspClient when the absolute warmup timeout expires."""
         if self._state == ServerState.INDEXING:
             if self._active_progress_tokens:
-                pct = self._best_percentage()
-                logger.info("LSP indexing timeout after %ds but progress is active "
-                            "(percentage=%s), not forcing READY",
-                            self._warmup_timeout,
-                            "%d%%" % pct if pct is not None else "unknown")
-                return
-            logger.warning("LSP indexing timeout after %ds, marking as READY",
-                           self._warmup_timeout)
+                logger.warning("LSP indexing timeout after %ds with active "
+                               "progress, marking as READY",
+                               self._warmup_timeout)
+            else:
+                logger.warning("LSP indexing timeout after %ds, marking as READY",
+                               self._warmup_timeout)
             self._mark_ready()
 
     @property
@@ -484,6 +436,95 @@ class ClangdNormalizer(LspNormalizer):
             if pct is not None and (best is None or pct > best):
                 best = pct
         return best
+
+    @property
+    def max_retries(self):
+        if self._state == ServerState.INDEXING:
+            return self._max_retries
+        return 1
+
+    @property
+    def retry_delay(self):
+        return self._retry_delay
+
+    def _mark_ready(self):
+        if self._state == ServerState.INDEXING:
+            self._ready_time = time.monotonic()
+            elapsed = self._ready_time - self._start_time
+            logger.info("LSP server ready after %.1fs", elapsed)
+            self._state = ServerState.READY
+            if self._ready_callback:
+                self._ready_callback()
+
+
+class ClangdNormalizer(ProgressNormalizer):
+    """Normalizer for clangd-specific behavior.
+
+    Extends ProgressNormalizer with clangd-specific quirks:
+    - Transient error classification during warmup
+    - LSP JSON-RPC error normalization into user-friendly messages
+    - Version detection and feature gating
+    - Position fallback for cross-file queries
+    - Extended warmup timeout when progress percentage is advancing
+    """
+
+    # Error message fragments that indicate a transient warmup condition
+    _TRANSIENT_ERROR_FRAGMENTS = (
+        "not indexed",
+        "not ready",
+        "building preamble",
+        "background indexing",
+        "file not found in compilation database",
+    )
+
+    # Minimum clangd major version required for each LSP method.
+    # Methods not listed here are assumed supported by all versions.
+    _METHOD_MIN_VERSION = {
+        "callHierarchy/outgoingCalls": 20,
+    }
+
+    _VERSION_RE = re.compile(r"(\d+)\.")
+
+    def __init__(self, warmup_timeout=60, max_retries=5, retry_delay=1.0):
+        super().__init__(warmup_timeout=warmup_timeout,
+                         max_retries=max_retries,
+                         retry_delay=retry_delay)
+        self._major_version = None
+
+    def on_server_info(self, server_info):
+        super().on_server_info(server_info)
+        if self._server_version:
+            m = self._VERSION_RE.search(self._server_version)
+            if m:
+                self._major_version = int(m.group(1))
+                logger.info("Detected clangd major version: %d", self._major_version)
+
+    @property
+    def needs_position_fallback(self):
+        return True
+
+    def supports_method(self, method):
+        min_ver = self._METHOD_MIN_VERSION.get(method)
+        if min_ver is None:
+            return True
+        if self._major_version is None:
+            # Unknown version — assume supported, let runtime error handle it
+            return True
+        return self._major_version >= min_ver
+
+    def on_warmup_timeout(self):
+        """Extend timeout when progress percentage is actively advancing."""
+        if self._state == ServerState.INDEXING:
+            if self._active_progress_tokens:
+                pct = self._best_percentage()
+                logger.info("LSP indexing timeout after %ds but progress is active "
+                            "(percentage=%s), not forcing READY",
+                            self._warmup_timeout,
+                            "%d%%" % pct if pct is not None else "unknown")
+                return
+            logger.warning("LSP indexing timeout after %ds, marking as READY",
+                           self._warmup_timeout)
+            self._mark_ready()
 
     def is_transient_error(self, error_msg):
         lower = error_msg.lower()
@@ -527,25 +568,6 @@ class ClangdNormalizer(LspNormalizer):
                 "The server may be busy indexing the project.")
 
         return error
-
-    @property
-    def max_retries(self):
-        if self._state == ServerState.INDEXING:
-            return self._max_retries
-        return 1
-
-    @property
-    def retry_delay(self):
-        return self._retry_delay
-
-    def _mark_ready(self):
-        if self._state == ServerState.INDEXING:
-            self._ready_time = time.monotonic()
-            elapsed = self._ready_time - self._start_time
-            logger.info("LSP server ready after %.1fs", elapsed)
-            self._state = ServerState.READY
-            if self._ready_callback:
-                self._ready_callback()
 
 
 class JdtlsNormalizer(LspNormalizer):
@@ -788,11 +810,18 @@ def _jdt_uri_to_jar_uri(uri):
     return uri
 
 
-def create_normalizer(command, warmup_timeout=60):
-    """Factory: pick the right normalizer based on the LSP server command."""
-    if command and command[0].endswith("clangd"):
+def create_normalizer(command, warmup_timeout=60, server_label=None):
+    """Factory: pick the right normalizer based on server_label or command.
+
+    Uses server_label (e.g. "clangd", "pyright") when available,
+    falling back to command[0] for detection.
+    """
+    label = server_label or (command[0] if command else "")
+    if "clangd" in label:
         return ClangdNormalizer(warmup_timeout=warmup_timeout)
-    if command and command[0].endswith("jdtls"):
+    if "jdtls" in label:
         return JdtlsNormalizer(warmup_timeout=max(warmup_timeout, 300))
+    if "pyright" in label or "rust-analyzer" in label:
+        return ProgressNormalizer(warmup_timeout=warmup_timeout)
     # Default: no quirks
     return LspNormalizer()

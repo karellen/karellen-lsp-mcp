@@ -119,22 +119,34 @@ class _FrontendSession:
     async def _handle_request(self, msg):
         """Dispatch a single request and write the response."""
         response = await self._dispatch(msg)
-        async with self._write_lock:
-            try:
+        try:
+            async with self._write_lock:
                 _write_message(self.writer, response)
-                await self.writer.drain()
-            except (ConnectionError, RuntimeError):
-                pass
+                await asyncio.wait_for(self.writer.drain(), timeout=30)
+        except (ConnectionError, RuntimeError):
+            pass
+        except asyncio.TimeoutError:
+            logger.warning("Timeout writing response for %s",
+                           msg.get("method", "?"))
 
     async def _dispatch(self, msg):
         msg_id = msg.get("id")
         method = msg.get("method", "")
         params = msg.get("params", {})
 
+        logger.debug("Daemon RX [frontend=%d] id=%s %s",
+                     self.session_id, msg_id, method)
+        t0 = time.monotonic()
         try:
             result = await self._handle_method(method, params)
+            logger.debug("Daemon TX [frontend=%d] id=%s %s ok (%.1fs)",
+                         self.session_id, msg_id, method,
+                         time.monotonic() - t0)
             return {"id": msg_id, "result": result}
         except (ProjectRegistryError, LspClientError) as e:
+            logger.debug("Daemon TX [frontend=%d] id=%s %s error: %s (%.1fs)",
+                         self.session_id, msg_id, method, e,
+                         time.monotonic() - t0)
             return {"id": msg_id, "error": {"message": str(e)}}
         except Exception as e:
             logger.error("Error handling %s", method, exc_info=True)

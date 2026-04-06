@@ -33,6 +33,7 @@ src/main/python/karellen_lsp_mcp/
 .claude-plugin/
   plugin.json          # Plugin manifest (name, version, description)
 .mcp.json              # MCP server configuration for the plugin
+.lsp.json              # LSP server configuration: maps file extensions to languages for Claude Code native LSP
 hooks/
   hooks.json           # SessionStart (prerequisites), PostToolUse (compiler error detection)
 scripts/
@@ -46,6 +47,8 @@ skills/
 docs/
   c-cpp.md             # C/C++ integration: detection, clangd, compile_commands.json
   java-kotlin.md       # Java/Kotlin integration: detection, jdtls, Gradle/Maven
+  python.md            # Python integration: detection, pyright, virtual environments
+  rust.md              # Rust integration: detection, rust-analyzer, Cargo workspaces
 src/unittest/python/       # Unit tests (mocked, no external deps)
 src/integrationtest/python/ # Integration tests (need clangd)
 ```
@@ -68,12 +71,17 @@ Console scripts:
   Both MCP and LSP proxy frontends share the same daemon registry — MCP-registered projects
   are visible to native LSP queries and vice versa.
 - **Normalizers**: Server-specific behavior abstracted via `LspNormalizer` subclasses.
-  `ClangdNormalizer` tracks clangd progress and version-based feature support.
+  `ProgressNormalizer` is the base for servers using standard `$/progress` notifications
+  (used directly for pyright, rust-analyzer). `ClangdNormalizer(ProgressNormalizer)` adds
+  clangd-specific quirks (transient errors, version gating, position fallback).
   `JdtlsNormalizer` tracks jdtls readiness via three conditions: ServiceReady seen,
   Searching progress seen, and no active progress tokens — preventing premature query
   dispatch during cold/warm index builds. Normalizers also handle response URI normalization
   (`normalize_response`) and incoming param denormalization (`denormalize_params`) with
   per-instance reverse URI mapping for hierarchy item roundtripping.
+- **Post-init configuration push**: After `initialized`, `LspClient` sends
+  `workspace/didChangeConfiguration` if settings are present in `init_options`.
+  Required by pyright which doesn't pull via `workspace/configuration`.
 - **Staleness detection**: `compile_commands.json` is checked for freshness (build config
   mtime, >= 5% dead source references) before use. Stale files trigger regeneration for
   CMake/Meson. Use `lsp_regenerate_index` to force regeneration.
@@ -89,8 +97,9 @@ When making any change to detection, adapters, normalizers, or supported languag
 
 1. Update the relevant `docs/*.md` integration article
 2. Update `README.md` supported languages table if languages changed
-3. Update plugin manifests, skills, investigator configs, and hooks if applicable
-4. Bump the version in `build.py` if the change affects the public API or tool behavior
+3. Update `.lsp.json` extension mappings if file extensions changed
+4. Update plugin manifests, skills, investigator configs, and hooks if applicable
+5. Bump the version in `build.py` if the change affects the public API or tool behavior
 
 ## Debugging & Troubleshooting
 
@@ -104,6 +113,9 @@ When making any change to detection, adapters, normalizers, or supported languag
   Kill the daemon first if it's already running (`pkill -f karellen_lsp_mcp.daemon`).
 - **Log level**: `LSP_MCP_LOG_LEVEL` environment variable controls log verbosity
   for both the LSP proxy and the daemon. Values: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`.
+- **LSP server debug**: `LSP_MCP_SERVER_DEBUG=1` enables verbose/trace logging
+  in LSP servers that support it (e.g., pyright `python.analysis.logLevel: trace`).
+  Independent from `LSP_MCP_LOG_LEVEL`.
 
 ## Code Style
 

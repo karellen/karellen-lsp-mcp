@@ -65,6 +65,8 @@ Claude Code LSP           Claude MCP Session 1      Claude MCP Session 2
 |----------|-------------------|---------------|---------|
 | C / C++ | [clangd](https://clangd.llvm.org/) | CMake, Meson, autotools, Make, Bazel | [docs/c-cpp.md](docs/c-cpp.md) |
 | Java / Kotlin | [jdtls](https://github.com/karellen/karellen-jdtls-kotlin) | Gradle, Maven, Ant | [docs/java-kotlin.md](docs/java-kotlin.md) |
+| Python | [pyright](https://github.com/microsoft/pyright) | PyBuilder, pyproject.toml, setup.py, Pipfile, requirements.txt | [docs/python.md](docs/python.md) |
+| Rust | [rust-analyzer](https://rust-analyzer.github.io/) | Cargo.toml, workspace detection | [docs/rust.md](docs/rust.md) |
 | Any | Custom via `lsp_command` parameter | &mdash; | Provide the command in `lsp_register_project` |
 
 Projects are autodetected when `language` is omitted from `lsp_register_project`, or
@@ -86,9 +88,11 @@ pip install --user karellen-lsp-mcp
 Install with LSP server dependencies:
 
 ```bash
-pip install --user karellen-lsp-mcp[clangd]    # C/C++ support
-pip install --user karellen-lsp-mcp[jdtls]     # Java/Kotlin support
-pip install --user karellen-lsp-mcp[all]       # All LSP servers
+pip install --user karellen-lsp-mcp[clangd]         # C/C++ support
+pip install --user karellen-lsp-mcp[jdtls]          # Java/Kotlin support
+pip install --user karellen-lsp-mcp[pyright]        # Python support
+pip install --user karellen-lsp-mcp[all]            # All LSP servers
+# Rust: rustup component add rust-analyzer
 ```
 
 Or with pipx for an isolated environment:
@@ -245,8 +249,8 @@ lsp_register_project(
 ```
 lsp_register_project(
     project_path="/path/to/project",
-    language="rust",
-    lsp_command=["rust-analyzer"]
+    language="go",
+    lsp_command=["gopls"]
 )
 ```
 

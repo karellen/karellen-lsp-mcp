@@ -28,7 +28,8 @@ from karellen_lsp_mcp.project_registry import (
     _compute_project_id,
 )
 from karellen_lsp_mcp.lsp_adapter import (
-    ClangdAdapter, JdtlsAdapter, get_adapter, get_supported_languages,
+    ClangdAdapter, JdtlsAdapter, PyrightAdapter, RustAnalyzerAdapter,
+    get_adapter, get_supported_languages,
     _is_compile_commands_stale,
 )
 
@@ -63,12 +64,18 @@ class AdapterRegistryTest(unittest.TestCase):
         for lang in ("java", "kotlin"):
             self.assertIsInstance(get_adapter(lang), JdtlsAdapter)
 
+    def test_pyright_registered_for_python(self):
+        self.assertIsInstance(get_adapter("python"), PyrightAdapter)
+
+    def test_rust_analyzer_registered_for_rust(self):
+        self.assertIsInstance(get_adapter("rust"), RustAnalyzerAdapter)
+
     def test_unknown_language_returns_none(self):
         self.assertIsNone(get_adapter("brainfuck"))
 
     def test_supported_languages(self):
         langs = get_supported_languages()
-        for expected in ("c", "cpp", "java", "kotlin"):
+        for expected in ("c", "cpp", "java", "kotlin", "python", "rust"):
             self.assertIn(expected, langs)
 
 
@@ -415,6 +422,86 @@ class JdtlsAdapterTest(unittest.TestCase):
     def test_works_for_kotlin(self, mock_which):
         config = self.adapter.configure("/project", "kotlin")
         self.assertEqual(config.command[0], "/usr/bin/jdtls")
+
+
+class PyrightAdapterTest(unittest.TestCase):
+    def setUp(self):
+        self.adapter = PyrightAdapter()
+        self._langserver_patch = unittest.mock.patch.object(
+            PyrightAdapter, "_find_langserver_js",
+            return_value="/fake/node_modules/pyright/langserver.index.js")
+        self._node_patch = unittest.mock.patch(
+            "karellen_lsp_mcp.lsp_adapter._shutil.which",
+            side_effect=lambda cmd: "/usr/bin/node" if cmd == "node" else None)
+        self._langserver_patch.start()
+        self._node_patch.start()
+
+    def tearDown(self):
+        self._node_patch.stop()
+        self._langserver_patch.stop()
+
+    def test_default_command(self):
+        config = self.adapter.configure("/project", "python")
+        # Launches node directly with langserver.index.js
+        self.assertEqual(config.command[0], "/usr/bin/node")
+        self.assertIn("langserver.index.js", config.command[1])
+        self.assertIn("--stdio", config.command)
+        self.assertIn("/project", config.root_uri)
+
+    def test_custom_command(self):
+        config = self.adapter.configure("/project", "python",
+                                        lsp_command=["pylsp"])
+        self.assertEqual(config.command, ["pylsp"])
+
+    def test_venv_path_from_details(self):
+        config = self.adapter.configure(
+            "/project", "python",
+            detection_details={"venv_path": "/project/.venv"})
+        self.assertIsNotNone(config.init_options)
+        settings = config.init_options["settings"]
+        self.assertIn(".venv", settings["python.venv"])
+        self.assertIn("python", settings["python.pythonPath"])
+
+    def test_venv_path_from_build_info(self):
+        config = self.adapter.configure(
+            "/project", "python",
+            build_info={"venv_path": "/project/venv"})
+        self.assertIsNotNone(config.init_options)
+        settings = config.init_options["settings"]
+        self.assertEqual(settings["python.venv"], "venv")
+
+    def test_no_venv_no_init_options(self):
+        config = self.adapter.configure("/project", "python")
+        self.assertIsNone(config.init_options)
+
+
+class RustAnalyzerAdapterTest(unittest.TestCase):
+    def setUp(self):
+        self.adapter = RustAnalyzerAdapter()
+
+    def test_default_command(self):
+        config = self.adapter.configure("/project", "rust")
+        self.assertEqual(config.command, ["rust-analyzer"])
+        self.assertIn("/project", config.root_uri)
+
+    def test_custom_command(self):
+        config = self.adapter.configure("/project", "rust",
+                                        lsp_command=["my-rust-analyzer"])
+        self.assertEqual(config.command, ["my-rust-analyzer"])
+
+    def test_workspace_root_from_details(self):
+        config = self.adapter.configure(
+            "/workspace/crate-a", "rust",
+            detection_details={"workspace_root": "/workspace"})
+        self.assertIn("/workspace", config.root_uri)
+        self.assertNotIn("crate-a", config.root_uri)
+
+    def test_no_workspace_root_uses_project_path(self):
+        config = self.adapter.configure("/project", "rust")
+        self.assertIn("/project", config.root_uri)
+
+    def test_no_managed_dir(self):
+        self.assertIsNone(self.adapter.managed_dir_name)
 
 
 class ProjectRegistryRegisterTest(unittest.TestCase):
