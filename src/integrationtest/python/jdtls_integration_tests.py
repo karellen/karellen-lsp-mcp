@@ -209,11 +209,11 @@ class JdtlsIntegrationTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if hasattr(cls, '_project_id'):
+        if hasattr(cls, '_registration_id'):
             try:
                 cls._loop.run_until_complete(
                     cls._helper.request("deregister_project",
-                                        {"project_id": cls._project_id}))
+                                        {"registration_id": cls._registration_id}))
             except Exception:
                 pass
         cls._loop.run_until_complete(cls._helper.stop())
@@ -245,7 +245,9 @@ class JdtlsIntegrationTest(unittest.TestCase):
             "language": "java",
         })
         self.assertIn("project_id", result)
+        self.assertIn("registration_id", result)
         self.__class__._project_id = result["project_id"]
+        self.__class__._registration_id = result["registration_id"]
 
     # --- LSP queries ---
 

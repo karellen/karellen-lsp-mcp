@@ -171,6 +171,7 @@ class ProjectInfo:
 @dataclass
 class RegisterResult:
     project_id: str
+    registration_id: str
 
 
 @dataclass

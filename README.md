@@ -283,8 +283,8 @@ lsp_register_project(
 - **Per-tool timeout**: all tools accept an optional `timeout` parameter (seconds)
   to override the default readiness timeout for that call. Useful for large
   codebases or debugging timeout issues
-- **Deregister when done**: `lsp_deregister_project` decrements the refcount; the LSP
-  server shuts down when all sessions deregister
+- **Deregister when done**: `lsp_deregister_project` takes the `registration_id` returned
+  by register; the LSP server shuts down when all registrations are released
 ````
 
 ## Available Tools
@@ -294,9 +294,9 @@ lsp_register_project(
 |------|-------------|
 | `lsp_scan_languages` | Scan project for file extensions and recommend LSP registrations. Lightweight alternative to detect. |
 | `lsp_detect_project` | Detect languages and build systems without registering. Analyzes build markers, IDE metadata, source conventions. |
-| `lsp_register_project` | Register a project for LSP analysis. Returns a project_id. Multiple sessions sharing the same project get the same LSP server. Use `regenerate=True` to clean managed data and force-restart. |
+| `lsp_register_project` | Register a project for LSP analysis. Returns a `project_id` (for queries) and a unique `registration_id` (for deregistering). Multiple sessions sharing the same project get the same LSP server. Use `regenerate=True` to clean managed data and force-restart. |
 | `lsp_regenerate_index` | Clean managed data (compilation databases, workspace caches) and force-restart the LSP server. |
-| `lsp_deregister_project` | Deregister a project. Decrements refcount; stops LSP server at 0. |
+| `lsp_deregister_project` | Deregister a project by `registration_id`. Decrements refcount; stops LSP server at 0. Each token can only be used once. |
 | `lsp_list_projects` | List all registered projects with status, refcounts, and paths. |
 | `lsp_indexing_status` | Query indexing progress for a project: state, elapsed time, active tasks with percentages, completed task count. Returns immediately without waiting for readiness. |
 

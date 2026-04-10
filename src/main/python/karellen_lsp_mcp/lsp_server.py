@@ -271,7 +271,8 @@ class LspProxyServer:
                             "details", {}).get("build_info"),
                     })
                 project_id = result["project_id"]
-                self._registered_ids.add(project_id)
+                registration_id = result["registration_id"]
+                self._registered_ids.add(registration_id)
                 logger.info("Registered %s → %s",
                             language, project_id)
             except Exception as e:
@@ -301,16 +302,16 @@ class LspProxyServer:
         }
 
     async def _handle_shutdown(self):
-        """Handle shutdown: deregister all projects."""
+        """Handle shutdown: deregister all registrations."""
         self._shutdown_requested = True
-        for project_id in list(self._registered_ids):
+        for reg_id in list(self._registered_ids):
             try:
                 await self._daemon.send_request(
                     "deregister_project",
-                    {"project_id": project_id})
+                    {"registration_id": reg_id})
             except Exception:
                 logger.warning("Error deregistering %s",
-                               project_id, exc_info=True)
+                               reg_id, exc_info=True)
         self._registered_ids.clear()
         return None
 

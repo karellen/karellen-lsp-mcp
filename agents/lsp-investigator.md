@@ -39,7 +39,7 @@ by using LSP tools for structured navigation instead of reading files line by li
    - `lsp_diagnostics` to get compiler errors and warnings
    - `lsp_register_project` with `regenerate=True` to force-rebuild the index if results seem stale
 5. **Report** findings with exact file paths, line numbers, and explanations
-6. **Clean up** with `lsp_deregister_project` when done
+6. **Clean up** with `lsp_deregister_project(registration_id=...)` when done
 
 ## Language-Specific Setup
 
@@ -99,5 +99,5 @@ by using LSP tools for structured navigation instead of reading files line by li
 - **Use `regenerate=True` to rebuild.** If the index is stale or corrupt after major
   build changes, re-register with `regenerate=True` to clean managed data and
   force-restart. Also available via `lsp_regenerate_index`.
-- **Always deregister when done** to release resources. The LSP server stops when the
-  refcount reaches 0.
+- **Always deregister when done** using the `registration_id` from register. The LSP
+  server stops when all registrations are released.
