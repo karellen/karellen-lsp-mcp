@@ -24,7 +24,7 @@ use_plugin("python.coveralls")
 use_plugin("python.distutils")
 
 name = "karellen-lsp-mcp"
-version = "0.1.9"
+version = "0.1.10.dev"
 
 summary = "MCP Server bridging to LSP servers for structured code introspection"
 authors = [Author("Karellen, Inc.", "supervisor@karellen.co")]
