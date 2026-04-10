@@ -117,6 +117,18 @@ Each field in `details` includes `_source` and `_tier` suffixed keys
 for provenance tracking (e.g., `bytecode_target_source: "compiler.xml"`,
 `bytecode_target_tier: 2`).
 
+## Eclipse Metadata Externalization
+
+By default jdtls writes Eclipse project metadata (`.project`, `.classpath`,
+`.factorypath`, `.settings/`) into the project root directory. To avoid
+polluting project directories, `karellen-lsp-mcp` passes the JVM system
+property `-Djava.import.generatesMetadataFilesAtProjectRoot=false` when
+launching jdtls. This redirects all metadata into the jdtls `-data`
+workspace directory under `~/.local/state/karellen-lsp-mcp/`.
+
+If metadata files already exist on disk (e.g., committed to the
+repository), they are used as-is and not redirected.
+
 ## jdtls Indexing and Readiness
 
 jdtls has a multi-phase startup: import (Gradle/Maven sync), build, search

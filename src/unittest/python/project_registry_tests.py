@@ -395,6 +395,11 @@ class JdtlsAdapterTest(unittest.TestCase):
         config = self.adapter.configure("/project", "java")
         self.assertEqual(config.command[0], "/usr/bin/jdtls")
         self.assertIn("-data", config.command)
+        self.assertIn("--launcher.appendVmargs", config.command)
+        self.assertIn("-vmargs", config.command)
+        self.assertIn(
+            "-Djava.import.generatesMetadataFilesAtProjectRoot=false",
+            config.command)
 
     @unittest.mock.patch("karellen_lsp_mcp.lsp_adapter._shutil.which", return_value="/usr/bin/jdtls")
     def test_custom_command_with_data(self, mock_which):
@@ -404,6 +409,14 @@ class JdtlsAdapterTest(unittest.TestCase):
         self.assertIn("/custom", config.command)
         # Should not add a second -data
         self.assertEqual(config.command.count("-data"), 1)
+
+    @unittest.mock.patch("karellen_lsp_mcp.lsp_adapter._shutil.which", return_value="/usr/bin/jdtls")
+    def test_metadata_not_duplicated_when_in_custom_command(self, mock_which):
+        metadata_prop = "-Djava.import.generatesMetadataFilesAtProjectRoot=false"
+        config = self.adapter.configure(
+            "/project", "java",
+            lsp_command=["jdtls", "-vmargs", metadata_prop])
+        self.assertEqual(config.command.count(metadata_prop), 1)
 
     @unittest.mock.patch("karellen_lsp_mcp.lsp_adapter._shutil.which", return_value=None)
     def test_no_jdtls_on_path_raises(self, mock_which):

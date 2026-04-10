@@ -518,6 +518,14 @@ class JdtlsAdapter(LspAdapter):
             data_dir = _jdtls_workspace_dir(workspace_root)
             cmd.extend(["-data", data_dir])
 
+        # Store Eclipse metadata (.project, .classpath, .settings/) in the
+        # -data workspace directory instead of polluting the project root.
+        # Uses --launcher.appendVmargs so the ini file's -vmargs are kept.
+        metadata_prop = "-Djava.import.generatesMetadataFilesAtProjectRoot=false"
+        if not any(metadata_prop in arg for arg in cmd):
+            cmd.extend(["--launcher.appendVmargs",
+                        "-vmargs", metadata_prop])
+
         # Build init_options from detection details
         init_options = self._build_init_options(details)
 
