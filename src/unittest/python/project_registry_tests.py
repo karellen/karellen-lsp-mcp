@@ -536,10 +536,12 @@ class ProjectRegistryRegisterTest(unittest.TestCase):
         loop = asyncio.new_event_loop()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            pid1 = loop.run_until_complete(registry.register(tmpdir, "c"))
-            pid2 = loop.run_until_complete(registry.register(tmpdir, "c"))
+            pid1, reg1 = loop.run_until_complete(registry.register(tmpdir, "c"))
+            pid2, reg2 = loop.run_until_complete(registry.register(tmpdir, "c"))
 
+            # Same project_id, different registration tokens
             self.assertEqual(pid1, pid2)
+            self.assertNotEqual(reg1, reg2)
 
             projects = registry.list_projects()
             self.assertEqual(len(projects), 1)
@@ -559,24 +561,43 @@ class ProjectRegistryRegisterTest(unittest.TestCase):
         loop = asyncio.new_event_loop()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            pid = loop.run_until_complete(registry.register(tmpdir, "cpp"))
-            loop.run_until_complete(registry.register(tmpdir, "cpp"))
+            _pid1, reg1 = loop.run_until_complete(registry.register(tmpdir, "cpp"))
+            _pid2, reg2 = loop.run_until_complete(registry.register(tmpdir, "cpp"))
 
-            # Refcount=2, deregister once -> still alive
-            loop.run_until_complete(registry.deregister(pid))
+            # Refcount=2, deregister first token -> still alive
+            loop.run_until_complete(registry.deregister(reg1))
             projects = registry.list_projects()
             self.assertEqual(len(projects), 1)
             self.assertEqual(projects[0]["refcount"], 1)
             mock_client.stop.assert_not_called()
 
-            # Deregister again -> removed
-            loop.run_until_complete(registry.deregister(pid))
+            # Deregister second token -> removed
+            loop.run_until_complete(registry.deregister(reg2))
             projects = registry.list_projects()
             self.assertEqual(len(projects), 0)
             mock_client.stop.assert_called_once()
         loop.close()
 
-    def test_deregister_unknown_project(self):
+    @patch("karellen_lsp_mcp.project_registry.LspClient")
+    def test_deregister_same_token_twice_fails(self, mock_lsp_class):
+        mock_client = AsyncMock()
+        mock_client.state_name = "indexing"
+        mock_lsp_class.return_value = mock_client
+
+        registry = ProjectRegistry()
+        loop = asyncio.new_event_loop()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _pid, reg1 = loop.run_until_complete(registry.register(tmpdir, "cpp"))
+            loop.run_until_complete(registry.register(tmpdir, "cpp"))
+
+            loop.run_until_complete(registry.deregister(reg1))
+            with self.assertRaises(ProjectRegistryError) as ctx:
+                loop.run_until_complete(registry.deregister(reg1))
+            self.assertIn("already-used", str(ctx.exception))
+        loop.close()
+
+    def test_deregister_unknown_token(self):
         registry = ProjectRegistry()
         loop = asyncio.new_event_loop()
         with self.assertRaises(ProjectRegistryError):
@@ -595,16 +616,22 @@ class ProjectRegistryRegisterTest(unittest.TestCase):
         loop = asyncio.new_event_loop()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            pid1 = loop.run_until_complete(registry.register(tmpdir, "c"))
-            pid2 = loop.run_until_complete(registry.register(tmpdir, "c", force=True))
+            pid1, reg1 = loop.run_until_complete(registry.register(tmpdir, "c"))
+            pid2, reg2 = loop.run_until_complete(
+                registry.register(tmpdir, "c", force=True))
 
             self.assertEqual(pid1, pid2)
+            self.assertNotEqual(reg1, reg2)
             mock_client1.stop.assert_called_once()
             mock_client2.start.assert_called_once()
 
             projects = registry.list_projects()
             self.assertEqual(len(projects), 1)
             self.assertEqual(projects[0]["refcount"], 1)
+
+            # Old token is invalidated by force
+            with self.assertRaises(ProjectRegistryError):
+                loop.run_until_complete(registry.deregister(reg1))
         loop.close()
 
 
@@ -619,7 +646,7 @@ class ProjectRegistryValidateFilePathTest(unittest.TestCase):
         loop = asyncio.new_event_loop()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            pid = loop.run_until_complete(registry.register(tmpdir, "c"))
+            pid, _reg = loop.run_until_complete(registry.register(tmpdir, "c"))
 
             test_file = os.path.join(tmpdir, "test.c")
             with open(test_file, "w") as f:
@@ -640,7 +667,7 @@ class ProjectRegistryValidateFilePathTest(unittest.TestCase):
         loop = asyncio.new_event_loop()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            pid = loop.run_until_complete(registry.register(tmpdir, "c"))
+            pid, _reg = loop.run_until_complete(registry.register(tmpdir, "c"))
 
             with self.assertRaises(ProjectRegistryError) as ctx:
                 registry.validate_file_path(pid, "relative/path.c")
@@ -658,7 +685,7 @@ class ProjectRegistryValidateFilePathTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir1, \
              tempfile.TemporaryDirectory() as tmpdir2:
-            pid = loop.run_until_complete(registry.register(tmpdir1, "c"))
+            pid, _reg = loop.run_until_complete(registry.register(tmpdir1, "c"))
 
             outside_file = os.path.join(tmpdir2, "outside.c")
             with open(outside_file, "w") as f:
@@ -692,10 +719,11 @@ class ProjectRegistryConcurrencyTest(unittest.TestCase):
 
         async def run():
             with tempfile.TemporaryDirectory() as tmpdir:
-                pid1_task = asyncio.create_task(registry.register(tmpdir, "c"))
-                pid2_task = asyncio.create_task(registry.register(tmpdir, "c"))
-                pid1, pid2 = await asyncio.gather(pid1_task, pid2_task)
+                t1 = asyncio.create_task(registry.register(tmpdir, "c"))
+                t2 = asyncio.create_task(registry.register(tmpdir, "c"))
+                (pid1, reg1), (pid2, reg2) = await asyncio.gather(t1, t2)
                 self.assertEqual(pid1, pid2)
+                self.assertNotEqual(reg1, reg2)
                 projects = registry.list_projects()
                 self.assertEqual(len(projects), 1)
                 self.assertEqual(projects[0]["refcount"], 2)
@@ -717,10 +745,11 @@ class ProjectRegistryConcurrencyTest(unittest.TestCase):
 
         async def run():
             with tempfile.TemporaryDirectory() as tmpdir:
-                pid = await registry.register(tmpdir, "c")
-                # refcount=1, two concurrent deregisters: one succeeds, one errors
-                t1 = asyncio.create_task(registry.deregister(pid))
-                t2 = asyncio.create_task(registry.deregister(pid))
+                _pid, reg = await registry.register(tmpdir, "c")
+                # refcount=1, two concurrent deregisters with same token:
+                # one succeeds, one errors (token already consumed)
+                t1 = asyncio.create_task(registry.deregister(reg))
+                t2 = asyncio.create_task(registry.deregister(reg))
                 results = await asyncio.gather(t1, t2, return_exceptions=True)
                 # Exactly one should succeed and one should raise
                 errors = [r for r in results if isinstance(r, Exception)]
@@ -749,8 +778,8 @@ class ProjectRegistryShutdownAllTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir1, \
              tempfile.TemporaryDirectory() as tmpdir2:
-            loop.run_until_complete(registry.register(tmpdir1, "c"))
-            loop.run_until_complete(registry.register(tmpdir2, "cpp"))
+            _pid1, reg1 = loop.run_until_complete(registry.register(tmpdir1, "c"))
+            _pid2, reg2 = loop.run_until_complete(registry.register(tmpdir2, "cpp"))
 
             self.assertEqual(len(registry.list_projects()), 2)
 
@@ -758,6 +787,12 @@ class ProjectRegistryShutdownAllTest(unittest.TestCase):
             self.assertEqual(len(registry.list_projects()), 0)
             mock_client1.stop.assert_called_once()
             mock_client2.stop.assert_called_once()
+
+            # Tokens are invalidated after shutdown_all
+            with self.assertRaises(ProjectRegistryError):
+                loop.run_until_complete(registry.deregister(reg1))
+            with self.assertRaises(ProjectRegistryError):
+                loop.run_until_complete(registry.deregister(reg2))
         loop.close()
 
 

@@ -317,7 +317,8 @@ async def lsp_register_project(project_path: str, language: str = None,
         "regenerate": regenerate,
         "timeout": timeout,
     })
-    return RegisterResult(project_id=result["project_id"])
+    return RegisterResult(project_id=result["project_id"],
+                          registration_id=result["registration_id"])
 
 
 @mcp.tool()
@@ -340,23 +341,25 @@ async def lsp_regenerate_index(project_id: str,
     result = await _request("regenerate_index",
                             {"project_id": project_id,
                              "timeout": timeout})
-    return RegisterResult(project_id=result["project_id"])
+    return RegisterResult(project_id=result["project_id"],
+                          registration_id=result["registration_id"])
 
 
 @mcp.tool()
 @_tag_errors
-async def lsp_deregister_project(project_id: str,
+async def lsp_deregister_project(registration_id: str,
                                  timeout: int = 30) -> StringResult:
-    """Deregister a project. Decrements refcount; stops LSP server when it reaches 0.
+    """Deregister a project registration. Decrements refcount; stops LSP
+    server when it reaches 0. Each registration_id can only be used once.
 
     Args:
-        project_id: The project_id returned by lsp_register_project.
+        registration_id: The registration_id returned by lsp_register_project.
         timeout: Maximum seconds to wait for LSP server readiness (default 30).
     """
     await _request("deregister_project",
-                   {"project_id": project_id,
+                   {"registration_id": registration_id,
                     "timeout": timeout})
-    return StringResult(result="Project %s deregistered." % project_id)
+    return StringResult(result="Registration %s deregistered." % registration_id)
 
 
 @mcp.tool()

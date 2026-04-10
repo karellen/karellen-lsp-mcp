@@ -242,6 +242,7 @@ class ServerEndToEndTest(_ServerTestBase):
             lsp_command=["clangd", "--background-index"],
             build_info={"compile_commands_dir": cls._tmpdir}))
         cls._project_id = reg.project_id
+        cls._registration_id = reg.registration_id
         # Open files to trigger indexing; daemon waits for readiness automatically
         for f in cls._files.values():
             cls._loop.run_until_complete(
@@ -251,7 +252,7 @@ class ServerEndToEndTest(_ServerTestBase):
     def tearDownClass(cls):
         try:
             cls._loop.run_until_complete(
-                server_mod.lsp_deregister_project(cls._project_id))
+                server_mod.lsp_deregister_project(cls._registration_id))
         except Exception:
             pass
         shutil.rmtree(cls._tmpdir, ignore_errors=True)
@@ -267,15 +268,15 @@ class ServerEndToEndTest(_ServerTestBase):
             build_info={"compile_commands_dir": self._tmpdir}))
         self.assertIsInstance(result, RegisterResult)
         self.assertTrue(len(result.project_id) > 0)
-        self._run(server_mod.lsp_deregister_project(result.project_id))
+        self._run(server_mod.lsp_deregister_project(result.registration_id))
 
     def test_deregister_returns_string_result(self):
         reg = self._run(server_mod.lsp_register_project(
             project_path=self._tmpdir, language="cpp",
             build_info={"compile_commands_dir": self._tmpdir}))
-        result = self._run(server_mod.lsp_deregister_project(reg.project_id))
+        result = self._run(server_mod.lsp_deregister_project(reg.registration_id))
         self.assertIsInstance(result, StringResult)
-        self.assertIn(reg.project_id, result.result)
+        self.assertIn(reg.registration_id, result.result)
 
     def test_list_projects_returns_typed_list(self):
         result = self._run(server_mod.lsp_list_projects())
@@ -446,7 +447,7 @@ class ServerEndToEndTest(_ServerTestBase):
         names = [s.name for s in result.symbols]
         self.assertIn("hello", names)
 
-        self._run(server_mod.lsp_deregister_project(reg.project_id))
+        self._run(server_mod.lsp_deregister_project(reg.registration_id))
 
     # --- Error handling via ToolError ---
 
@@ -501,13 +502,13 @@ class ServerMultiProjectTest(_ServerTestBase):
         self.assertEqual(projects[0].refcount, 2)
 
         # First deregister -> refcount=1
-        self._run(server_mod.lsp_deregister_project(reg1.project_id))
+        self._run(server_mod.lsp_deregister_project(reg1.registration_id))
         projects = self._run(server_mod.lsp_list_projects())
         self.assertEqual(len(projects), 1)
         self.assertEqual(projects[0].refcount, 1)
 
         # Second deregister -> project removed (refcount=0)
-        self._run(server_mod.lsp_deregister_project(reg2.project_id))
+        self._run(server_mod.lsp_deregister_project(reg2.registration_id))
         projects = self._run(server_mod.lsp_list_projects())
         self.assertEqual(len(projects), 0)
 
@@ -542,7 +543,7 @@ class ServerMultiProjectTest(_ServerTestBase):
         self.assertIn("main", names2)
 
         # Deregister project 1 -> project 2 still works
-        self._run(server_mod.lsp_deregister_project(reg1.project_id))
+        self._run(server_mod.lsp_deregister_project(reg1.registration_id))
         projects = self._run(server_mod.lsp_list_projects())
         self.assertEqual(len(projects), 1)
         self.assertEqual(projects[0].project_id, reg2.project_id)
@@ -557,7 +558,7 @@ class ServerMultiProjectTest(_ServerTestBase):
             self._run(server_mod.lsp_document_symbols(
                 reg1.project_id, self._files1["main.cpp"]))
 
-        self._run(server_mod.lsp_deregister_project(reg2.project_id))
+        self._run(server_mod.lsp_deregister_project(reg2.registration_id))
         projects = self._run(server_mod.lsp_list_projects())
         self.assertEqual(len(projects), 0)
 
@@ -577,8 +578,8 @@ class ServerMultiProjectTest(_ServerTestBase):
                  if p.project_id == reg_cpp.project_id}
         self.assertEqual(langs, {"c"})
 
-        self._run(server_mod.lsp_deregister_project(reg_cpp.project_id))
-        self._run(server_mod.lsp_deregister_project(reg_c.project_id))
+        self._run(server_mod.lsp_deregister_project(reg_cpp.registration_id))
+        self._run(server_mod.lsp_deregister_project(reg_c.registration_id))
 
     def test_force_register_resets_lsp_server(self):
         reg1 = self._run(server_mod.lsp_register_project(
@@ -599,14 +600,14 @@ class ServerMultiProjectTest(_ServerTestBase):
         names = [s.name for s in syms.symbols]
         self.assertIn("main", names)
 
-        self._run(server_mod.lsp_deregister_project(reg2.project_id))
+        self._run(server_mod.lsp_deregister_project(reg2.registration_id))
 
     def test_queries_after_deregister_raise_tool_error(self):
         reg = self._run(server_mod.lsp_register_project(
             project_path=self._tmpdir1, language="cpp",
             build_info={"compile_commands_dir": self._tmpdir1}))
 
-        self._run(server_mod.lsp_deregister_project(reg.project_id))
+        self._run(server_mod.lsp_deregister_project(reg.registration_id))
 
         # All query types should fail with ToolError
         with self.assertRaises(ToolError):

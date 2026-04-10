@@ -116,7 +116,7 @@ lsp_diagnostics(project_id="<id>", file_path="/path/to/file.cpp")
 ### 7. Clean Up
 
 ```
-lsp_deregister_project(project_id="<id>")
+lsp_deregister_project(registration_id="<registration_id>")
 ```
 
 ## Investigation Strategies
@@ -171,4 +171,4 @@ lsp_deregister_project(project_id="<id>")
   default readiness timeout. Use higher values for large codebases (e.g. `timeout=300`).
 - **Use `lsp_regenerate_index` to rebuild.** If the index is stale or corrupt, this
   cleans managed data and force-restarts the LSP server.
-- **Always deregister when done** to release resources.
+- **Always deregister when done** using the `registration_id` to release resources.

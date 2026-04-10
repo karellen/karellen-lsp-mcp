@@ -85,7 +85,7 @@ class _FrontendSession:
         self.reader = reader
         self.writer = writer
         self.daemon = daemon
-        self.registered_projects = set()  # project_ids registered by this frontend
+        self.registered_tokens = set()  # registration_ids owned by this frontend
         self._write_lock = asyncio.Lock()
         self._pending_tasks = set()
 
@@ -212,7 +212,7 @@ class _FrontendSession:
                     adapter.clean_managed_data(
                         params["project_path"])
 
-            project_id = await registry.register(
+            project_id, registration_id = await registry.register(
                 project_path=params["project_path"],
                 language=language,
                 lsp_command=lsp_command,
@@ -221,13 +221,15 @@ class _FrontendSession:
                 detection_details=detection_details,
                 force=force,
             )
-            self.registered_projects.add(project_id)
-            return {"project_id": project_id}
+            self.registered_tokens.add(registration_id)
+            return {"project_id": project_id,
+                    "registration_id": registration_id}
 
         elif method == "deregister_project":
-            project_id = params["project_id"]
-            await registry.deregister(project_id)
-            self.registered_projects.discard(project_id)
+            registration_id = params.get("registration_id",
+                                         params.get("project_id"))
+            await registry.deregister(registration_id)
+            self.registered_tokens.discard(registration_id)
             return {"ok": True}
 
         elif method == "list_projects":
@@ -241,18 +243,20 @@ class _FrontendSession:
             if adapter is not None:
                 adapter.clean_managed_data(entry.path)
             # Force re-register: stops existing server, re-runs
-            # detection and adapter configuration from scratch
-            new_id = await registry.register(
+            # detection and adapter configuration from scratch.
+            # Force invalidates all existing registration tokens.
+            new_id, registration_id = await registry.register(
                 project_path=entry.path,
                 language=entry.language,
                 lsp_command=entry.lsp_command,
                 build_info=entry.build_info,
                 force=True,
             )
-            # Update session tracking
-            self.registered_projects.discard(project_id)
-            self.registered_projects.add(new_id)
-            return {"project_id": new_id}
+            # Update session tracking — old tokens were invalidated
+            # by force, add the new one
+            self.registered_tokens.add(registration_id)
+            return {"project_id": new_id,
+                    "registration_id": registration_id}
 
         elif method == "indexing_status":
             project_id = params["project_id"]
@@ -713,14 +717,15 @@ class _FrontendSession:
         return {}
 
     async def _cleanup(self):
-        """Deregister all projects this frontend registered."""
+        """Deregister all registrations this frontend owns."""
         registry = self.daemon.registry
-        for project_id in list(self.registered_projects):
+        for reg_id in list(self.registered_tokens):
             try:
-                await registry.deregister(project_id)
+                await registry.deregister(reg_id)
             except Exception:
-                logger.warning("Error deregistering %s on disconnect", project_id, exc_info=True)
-        self.registered_projects.clear()
+                logger.warning("Error deregistering %s on disconnect",
+                               reg_id, exc_info=True)
+        self.registered_tokens.clear()
         self.daemon.remove_frontend(self.session_id)
 
 

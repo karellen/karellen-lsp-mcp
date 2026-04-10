@@ -346,6 +346,7 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             })
         )
         cls._project_id = result["project_id"]
+        cls._registration_id = result["registration_id"]
         # Pre-open all source files so clangd indexes them
         for f in cls._files.values():
             cls._loop.run_until_complete(cls._helper.request(
@@ -359,7 +360,7 @@ class DaemonLspIntegrationTest(unittest.TestCase):
         try:
             cls._loop.run_until_complete(
                 cls._helper.request("deregister_project",
-                                    {"project_id": cls._project_id}))
+                                    {"registration_id": cls._registration_id}))
         except Exception:
             pass
         cls._loop.run_until_complete(cls._helper.stop())
@@ -386,11 +387,13 @@ class DaemonLspIntegrationTest(unittest.TestCase):
             "language": "cpp",
         })
         self.assertEqual(result["project_id"], self._project_id)
+        self.assertIn("registration_id", result)
 
         projects = self._request("list_projects", {})
         self.assertEqual(projects[0]["refcount"], 2)
 
-        self._request("deregister_project", {"project_id": self._project_id})
+        self._request("deregister_project",
+                      {"registration_id": result["registration_id"]})
 
     # --- Document symbols ---
 
@@ -723,12 +726,13 @@ class DaemonForceRegisterTest(unittest.TestCase):
                 "build_info": {"compile_commands_dir": self._tmpdir},
             }))
         self._project_id = result["project_id"]
+        self._registration_id = result["registration_id"]
 
     def tearDown(self):
         try:
             self._loop.run_until_complete(
                 self._helper.request("deregister_project",
-                                     {"project_id": self._project_id}))
+                                     {"registration_id": self._registration_id}))
         except Exception:
             pass
         self._loop.run_until_complete(self._helper.stop())
@@ -809,6 +813,7 @@ class DaemonMultiFrontendTest(unittest.TestCase):
                 "build_info": {"compile_commands_dir": self._tmpdir},
             })
             pid = res1["project_id"]
+            reg1 = res1["registration_id"]
 
             # Frontend 2 registers same project
             res2 = await req(r2, w2, 1, "register_project", {
@@ -816,13 +821,16 @@ class DaemonMultiFrontendTest(unittest.TestCase):
                 "language": "cpp",
             })
             self.assertEqual(res2["project_id"], pid)
+            reg2 = res2["registration_id"]
+            self.assertNotEqual(reg1, reg2)
 
             # Check refcount = 2
             projects = await req(r1, w1, 2, "list_projects")
             self.assertEqual(projects[0]["refcount"], 2)
 
-            # Frontend 1 deregisters
-            await req(r1, w1, 3, "deregister_project", {"project_id": pid})
+            # Frontend 1 deregisters its own registration
+            await req(r1, w1, 3, "deregister_project",
+                      {"registration_id": reg1})
 
             # Check refcount = 1
             projects = await req(r2, w2, 2, "list_projects")
@@ -837,8 +845,9 @@ class DaemonMultiFrontendTest(unittest.TestCase):
             self.assertIn("add", names)
             self.assertIn("subtract", names)
 
-            # Frontend 2 deregisters
-            await req(r2, w2, 4, "deregister_project", {"project_id": pid})
+            # Frontend 2 deregisters its own registration
+            await req(r2, w2, 4, "deregister_project",
+                      {"registration_id": reg2})
 
             # Project should be gone
             projects = await req(r1, w1, 4, "list_projects")

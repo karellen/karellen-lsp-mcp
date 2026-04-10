@@ -167,10 +167,12 @@ All queries use the `project_id` returned by registration:
 ### 5. Deregister When Done
 
 ```
-lsp_deregister_project(project_id="<id>")
+lsp_deregister_project(registration_id="<registration_id>")
 ```
 
-This decrements the refcount. The LSP server stops when all sessions deregister.
+This decrements the refcount using the unique `registration_id` returned by
+`lsp_register_project`. Each token can only be used once. The LSP server stops
+when all registrations are released.
 
 ## Key Rules
 

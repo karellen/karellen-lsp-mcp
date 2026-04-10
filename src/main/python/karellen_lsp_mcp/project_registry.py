@@ -20,6 +20,7 @@ import hashlib
 import logging
 import os
 import urllib.parse
+import uuid
 
 from karellen_lsp_mcp.lsp_adapter import get_adapter, canonicalize_language
 from karellen_lsp_mcp.lsp_client import LspClient
@@ -33,7 +34,7 @@ class ProjectRegistryError(Exception):
 
 class _ProjectEntry:
     __slots__ = ("project_id", "path", "language", "lsp_command", "build_info",
-                 "client", "refcount", "status")
+                 "client", "refcount", "status", "registration_ids")
 
     def __init__(self, project_id, path, language, lsp_command, build_info):
         self.project_id = project_id
@@ -44,6 +45,7 @@ class _ProjectEntry:
         self.client = None
         self.refcount = 0
         self.status = "stopped"
+        self.registration_ids = set()
 
 
 def _compute_project_id(real_path, language):
@@ -56,6 +58,7 @@ class ProjectRegistry:
 
     def __init__(self, request_timeout=60, ready_timeout=120):
         self._projects = {}  # project_id -> _ProjectEntry
+        self._registrations = {}  # registration_id -> project_id
         self._request_timeout = request_timeout
         self._ready_timeout = ready_timeout
         self._lock = asyncio.Lock()
@@ -63,7 +66,13 @@ class ProjectRegistry:
     async def register(self, project_path, language, lsp_command=None,
                        build_info=None, init_options=None,
                        detection_details=None, force=False):
-        """Register a project, starting LSP server if new. Returns project_id."""
+        """Register a project, starting LSP server if new.
+
+        Returns (project_id, registration_id). The registration_id is a
+        unique token for this specific registration that must be used to
+        deregister. Multiple registrations of the same project receive
+        different registration_ids sharing the same project_id.
+        """
         real_path = os.path.realpath(project_path)
         if not os.path.isdir(real_path):
             raise ProjectRegistryError("Project path does not exist: %s" % real_path)
@@ -72,16 +81,26 @@ class ProjectRegistry:
         project_id = _compute_project_id(real_path, language)
 
         async with self._lock:
+            registration_id = uuid.uuid4().hex[:16]
+
             if project_id in self._projects and not force:
                 entry = self._projects[project_id]
                 entry.refcount += 1
+                entry.registration_ids.add(registration_id)
+                self._registrations[registration_id] = project_id
                 if build_info:
                     entry.build_info.update(build_info)
-                logger.info("Project %s refcount incremented to %d", project_id, entry.refcount)
-                return project_id
+                logger.info("Project %s refcount incremented to %d "
+                            "(reg=%s)", project_id, entry.refcount,
+                            registration_id)
+                return project_id, registration_id
 
             if project_id in self._projects and force:
-                await self._stop_entry(self._projects[project_id])
+                old_entry = self._projects[project_id]
+                # Invalidate all existing registrations for this project
+                for old_reg_id in old_entry.registration_ids:
+                    self._registrations.pop(old_reg_id, None)
+                await self._stop_entry(old_entry)
 
             # Use adapter to build LSP configuration
             adapter = get_adapter(language)
@@ -142,23 +161,39 @@ class ProjectRegistry:
                 entry.client = client
                 entry.status = client.state_name
                 entry.refcount = 1
-                logger.info("Project %s registered: %s (%s)", project_id, real_path, language)
+                entry.registration_ids.add(registration_id)
+                self._registrations[registration_id] = project_id
+                logger.info("Project %s registered: %s (%s) reg=%s",
+                            project_id, real_path, language,
+                            registration_id)
             except Exception as e:
                 entry.status = "error"
                 del self._projects[project_id]
                 raise ProjectRegistryError("Failed to start LSP server: %s" % e) from e
 
-            return project_id
+            return project_id, registration_id
 
-    async def deregister(self, project_id):
-        """Decrement refcount; stop LSP server if it reaches 0."""
+    async def deregister(self, registration_id):
+        """Deregister by registration token. Decrements refcount;
+        stops LSP server if it reaches 0. Each token can only be
+        used once."""
         async with self._lock:
+            project_id = self._registrations.pop(registration_id, None)
+            if project_id is None:
+                raise ProjectRegistryError(
+                    "Unknown or already-used registration: %s"
+                    % registration_id)
+
             entry = self._projects.get(project_id)
             if entry is None:
-                raise ProjectRegistryError("Unknown project: %s" % project_id)
+                # Project was force-removed; token is stale
+                return
 
+            entry.registration_ids.discard(registration_id)
             entry.refcount -= 1
-            logger.info("Project %s refcount decremented to %d", project_id, entry.refcount)
+            logger.info("Project %s refcount decremented to %d "
+                        "(dereg=%s)", project_id, entry.refcount,
+                        registration_id)
 
             if entry.refcount <= 0:
                 await self._stop_entry(entry)
@@ -196,6 +231,7 @@ class ProjectRegistry:
         for entry in list(self._projects.values()):
             await self._stop_entry(entry)
         self._projects.clear()
+        self._registrations.clear()
 
     async def _stop_entry(self, entry):
         if entry.client is not None:
