@@ -13,7 +13,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""FastMCP server (thin MCP stdio frontend) that delegates all LSP operations to the daemon."""
+"""MCP server (thin MCP stdio frontend) that delegates all LSP operations to the daemon."""
 
 import atexit
 import asyncio
@@ -22,9 +22,10 @@ import logging
 import os
 import signal
 import traceback
+from importlib.metadata import PackageNotFoundError, version
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from karellen_lsp_mcp.daemon_client import DaemonClient, DaemonClientError
 from karellen_lsp_mcp.types import (
@@ -39,7 +40,12 @@ from karellen_lsp_mcp.types import (
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("karellen-lsp-mcp", instructions=(
+try:
+    _version = version("karellen-lsp-mcp")
+except PackageNotFoundError:
+    _version = ""
+
+mcp = MCPServer("karellen-lsp-mcp", instructions=(
     "LSP-backed code intelligence server. Use lsp_register_project to register a project "
     "with its language, then use query tools to introspect code. "
     "Navigation: lsp_read_definition, lsp_read_declaration, lsp_read_type_definition, "
@@ -52,7 +58,7 @@ mcp = FastMCP("karellen-lsp-mcp", instructions=(
     "All line/character positions are 1-based. "
     "All tools accept an optional timeout parameter (seconds) to override the default "
     "readiness timeout — use higher values for large codebases."
-))
+), version=_version)
 
 _client = None
 _client_lock = asyncio.Lock()
