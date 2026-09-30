@@ -30,7 +30,7 @@ import textwrap
 import unittest
 import unittest.mock
 
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from karellen_lsp_mcp.daemon import Daemon
 from karellen_lsp_mcp.types import (

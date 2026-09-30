@@ -14,7 +14,16 @@ pyb run_unit_tests           # unit tests only
 pyb run_integration_tests    # integration tests (requires clangd on PATH)
 ```
 
-Dependencies: `mcp`, `lsprotocol`, `filelock`, `platformdirs`
+Dependencies: `mcp` (MCP Python SDK v2, `MCPServer`), `lsprotocol`, `filelock`, `platformdirs`
+
+`src/unittest/python/mcp_protocol_tests.py` drives the server through a real MCP `Client`
+(in-process and over a stdio subprocess) to cover protocol negotiation and tool listing.
+It never calls a tool, so it never touches the daemon.
+
+If `karellen-lsp-mcp` (and therefore `mcp`) is installed in the user site-packages
+(`pip install --user`), run `pyb` from a dedicated virtualenv rather than the user-site `pyb`:
+PyBuilder keeps user-site paths ahead of the build venv in the test subprocess, so tests
+silently import the user-site `mcp` instead of the pinned one.
 
 ## Project Layout
 
