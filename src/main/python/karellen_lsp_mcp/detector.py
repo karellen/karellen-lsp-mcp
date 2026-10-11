@@ -931,15 +931,7 @@ class CppDetector(ProjectDetector):
 # Python Detector
 # ---------------------------------------------------------------------------
 
-# TOML parsing: stdlib in 3.11+, optional tomli backport for 3.10
-try:
-    import tomllib as _tomllib
-except ModuleNotFoundError:
-    try:
-        import tomli as _tomllib
-    except ModuleNotFoundError:
-        _tomllib = None
-
+import tomllib as _tomllib
 import configparser as _configparser
 
 _PYPROJECT_TOML = "pyproject.toml"
@@ -997,8 +989,6 @@ def _parse_pyproject_toml(project_path):
     Returns a dict with build_backend, python_requires, and tool settings,
     or None if the file doesn't exist or can't be parsed.
     """
-    if _tomllib is None:
-        return None
     toml_path = os.path.join(project_path, _PYPROJECT_TOML)
     if not os.path.isfile(toml_path):
         return None
@@ -1310,8 +1300,6 @@ def _parse_cargo_toml(project_path):
     Returns a dict with workspace_members, edition, etc.,
     or None if the file doesn't exist or can't be parsed.
     """
-    if _tomllib is None:
-        return None
     cargo_path = os.path.join(project_path, _CARGO_TOML)
     if not os.path.isfile(cargo_path):
         return None
@@ -1354,7 +1342,7 @@ def _detect_rust_toolchain(project_path):
     """Detect Rust toolchain from rust-toolchain.toml or rust-toolchain."""
     # rust-toolchain.toml (TOML format)
     toml_path = os.path.join(project_path, _RUST_TOOLCHAIN_TOML)
-    if os.path.isfile(toml_path) and _tomllib is not None:
+    if os.path.isfile(toml_path):
         try:
             with open(toml_path, "rb") as f:
                 data = _tomllib.load(f)

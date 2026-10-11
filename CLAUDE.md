@@ -6,7 +6,7 @@ and tool documentation.
 
 ## Build & Test
 
-PyBuilder project. Python >= 3.10.
+PyBuilder project. Python >= 3.11.
 
 ```bash
 pyb                          # default task: analyze + publish

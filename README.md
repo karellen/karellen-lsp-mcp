@@ -75,7 +75,7 @@ IDE metadata (JetBrains `.idea/`, Eclipse, VS Code), and source file conventions
 
 ## Requirements
 
-- **Python** >= 3.10
+- **Python** >= 3.11
 - **An LSP server** for your language, installed and on PATH
 - **Linux** or **macOS** (uses Unix domain sockets; Windows 10 build 17063+ also works)
 

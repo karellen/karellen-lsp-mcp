@@ -19,8 +19,8 @@ The `PythonDetector` checks markers in priority order:
 | `Pipfile` | pipenv | medium | &mdash; |
 | `requirements.txt` | pip | medium | &mdash; |
 
-When `pyproject.toml` is present and a TOML parser is available (`tomllib` in
-Python 3.11+, or `tomli` backport), the detector reads:
+When `pyproject.toml` is present, the detector parses it with the standard
+library `tomllib` and reads:
 - `[build-system].requires` to identify the build backend
 - `[project].requires-python` for Python version constraints
 - `[tool.pyright]` presence for pyright configuration

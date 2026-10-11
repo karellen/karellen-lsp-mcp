@@ -46,10 +46,9 @@ rust-analyzer sees all workspace members.
 
 ## TOML Parsing
 
-`Cargo.toml` parsing requires a TOML library. Python 3.11+ has `tomllib` in
-the standard library. For Python 3.10, install `tomli` (`pip install tomli`)
-for full detection capabilities. Without a TOML parser, detection still works
-(file existence) but workspace members and edition are not extracted.
+`Cargo.toml` and `rust-toolchain.toml` are parsed with the standard library
+`tomllib`. If a file cannot be parsed, detection still works (file existence)
+but workspace members, edition and toolchain channel are not extracted.
 
 ## Rust Toolchain
 
